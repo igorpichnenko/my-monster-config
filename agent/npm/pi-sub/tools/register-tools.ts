@@ -4,6 +4,7 @@
  * Оптимизировано для минимального размера system prompt:
  * - Убраны description из параметров (экономия ~100 токенов)
  * - ctx_stats закомментирован (экономия ~50-80 токенов)
+ * - Добавлена подсказка Ctrl+O для разворачивания результатов
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -15,6 +16,9 @@ import { executeCtxBash, type CtxBashArgs } from "../context-tools/ctx-bash.js";
 import { executeCtxRead, type CtxReadArgs } from "../context-tools/ctx-read.js";
 import { executeCtxSearch, type CtxSearchArgs } from "../context-tools/ctx-search.js";
 // import { executeCtxStats } from "../context-tools/ctx-stats.js";  // ← Закомментировано для экономии токенов
+
+/** Подсказка для разворачивания результата */
+const EXPAND_HINT = " (Ctrl+O to expand)";
 
 /** Общий renderResult для инструментов с сохранением в БД */
 function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, label: string) {
@@ -38,7 +42,13 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
     if (expanded) {
       return new Text(theme.fg("success", "✓ done\n") + theme.fg("dim", text), 0, 0);
     } else {
-      return new Text(theme.fg("success", "✓ done") + theme.fg("dim", ` — ${preview}`), 0, 0);
+      return new Text(
+        theme.fg('success', '✓ done') +
+          theme.fg('dim', ` — ${preview}`) +
+          theme.fg('muted', EXPAND_HINT),
+        0,
+        0
+      );
     }
   }
   
@@ -51,7 +61,13 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
       return new Text(theme.fg("success", "✓ saved to DB\n\n") + theme.fg("dim", summary), 0, 0);
     } else {
       const summaryFirstLine = summary.split("\n").find((l: string) => l.trim()) || "";
-      return new Text(theme.fg("success", "✓ saved to DB") + theme.fg("dim", ` — ${summaryFirstLine.slice(0, 80)}`), 0, 0);
+      return new Text(
+        theme.fg('success', '✓ saved to DB') +
+          theme.fg('dim', ` — ${summaryFirstLine.slice(0, 80)}`) +
+          theme.fg('muted', EXPAND_HINT),
+        0,
+        0
+      );
     }
   }
   
@@ -59,7 +75,13 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
   if (expanded) {
     return new Text(theme.fg("success", "✓ done\n\n") + theme.fg("dim", text.slice(0, 500)), 0, 0);
   } else {
-    return new Text(theme.fg("success", "✓ done") + theme.fg("dim", ` — ${preview}`), 0, 0);
+    return new Text(
+      theme.fg('success', '✓ done') +
+        theme.fg('dim', ` — ${preview}`) +
+        theme.fg('muted', EXPAND_HINT),
+      0,
+      0
+    );
   }
 }
 
