@@ -463,3 +463,494 @@ export default function (pi: ExtensionAPI) {
 - Memory DB: `~/.pi/agent/npm/pi-sub/memory/database.ts`
 - Ctx Bash: `~/.pi/agent/npm/pi-sub/context-tools/ctx-bash.ts`
 - Result Compressor: `~/.pi/agent/npm/pi-sub/memory/result-compressor.ts`
+
+
+# Архитектура pi-sub
+
+## 📐 Обзор
+
+`pi-sub` — это расширение для pi-coding-agent, реализующее систему субагентов с долгосрочной памятью. Работает как расширение, которое перехватывает события pi, переопределяет инструменты и добавляет команды.
+
+---
+
+## 🏗 Структура файлов
+
+```
+pi-sub/
+├── index.ts                    # Точка входа, инициализация
+├── agent-manager.ts            # Управление жизненным циклом агентов
+├── agent-runner.ts             # Ядро выполнения: создание сессий, запуск агентов
+├── agent-types.ts              # Реестр типов агентов (встроенные + пользовательские)
+├── custom-agents.ts            # Загрузка пользовательских агентов из .pi/agents/
+├── default-agents.ts           # Встроенные агенты по умолчанию
+├── prompts.ts                  # Сборка системных промптов
+├── context.ts                  # Контекст для передачи между агентами
+├── env.ts                      # Определение окружения (git, платформа)
+├── settings.ts                 # Управление настройками
+├── usage.ts                    # Учёт токенов и стоимости
+├── status-note.ts              # Статус-нотификации
+├── invocation-config.ts        # Конфигурация запуска агентов
+├── helpers/activity-tracker.ts # Трекер активности
+├── types.ts                    # Типы (AgentConfig, AgentRecord, и т.д.)
+├── types/pi-sub-context.ts     # Контекст для субагентов
+├── commands/
+│   ├── agent-commands.ts       # /agent-bg, /agent-steer, /agent-result...
+│   ├── memory-commands.ts      # /memory-stats, /memory-add, /memory-search...
+│   └── agents-menu.ts          # /agents — меню выбора агентов
+├── tools/
+│   └── register-tools.ts       # Переопределение bash/read/grep/find/ls + ctx_search
+├── renderers/
+│   └── message-renderers.ts    # Кастомный рендеринг сообщений
+├── ui/
+│   └── agent-widget.ts         # Виджет статуса субагентов (обновление 80мс)
+├── memory/
+│   ├── database.ts             # SQLite + FTS5 база данных
+│   ├── session-memory.ts       # Извлечение фактов из сессий
+│   └── result-compressor.ts    # Сжатие больших результатов
+└── context-tools/
+    ├── ctx-bash.ts             # bash с сохранением контекста
+    ├── ctx-read.ts             # read с сохранением контекста
+    ├── ctx-search.ts           # ctx_search (FTS5)
+    ├── ctx-stats.ts            # Статистика БД
+    └── utils/                  # Утилиты (analyzers, logger, summary)
+```
+
+---
+
+## 🔄 Жизненный цикл субагента
+
+### 1. Запуск (`/agent-bg`)
+
+```
+Пользователь
+    │
+    ▼
+/agent-bg [--no-inject] <prompt>
+    │
+    ▼
+AgentManager.spawn()
+    │
+    ├── 1. Создаёт AgentRecord (id, type, status="queued")
+    │
+    ├── 2. Добавляет в очередь (или запускает сразу если < maxConcurrent)
+    │
+    ├── 3. AgentManager.runAgent()
+    │       │
+    │       ├── 3a. AgentRunner.runAgent()
+    │       │       │
+    │       │       ├── 3a-i. Создаёт новую сессию (createAgentSession)
+    │       │       │   - Уникальный sessionId
+    │       │       │   - Копирует настройки из AgentConfig
+    │       │       │   - Загружает extensions/skills/prompts
+    │       │       │
+    │       │       ├── 3a-ii. Собирает системный промпт (prompts.ts)
+    │       │       │   - "append" режим: parent prompt + sub_agent_context + custom prompt
+    │       │       │   - "replace" режим: только custom prompt
+    │       │       │   - Инжекция memoryBlock (факты из session memory)
+    │       │       │   - Инжекция preloaded skills
+    │       │       │
+    │       │       ├── 3a-iii. Запускает agent loop
+    │       │       │   - LLM вызывает инструменты
+    │       │       │   - AgentRunner перехватывает SUBAGENT_TOOL_NAMES
+    │       │       │     (get_subagent_result, steer_subagent)
+    │       │       │
+    │       │       └── 3a-iv. Собирает результат
+    │       │           - toolUses, duration, usage
+    │       │           - Сжатие результата (result-compressor.ts)
+    │       │
+    │       └── 3b. Обновляет AgentRecord (status="completed", result)
+    │
+    └── 4. AgentWidget.update() — обновление UI
+        │
+        └── 5. onComplete callback — уведомление пользователя
+```
+
+### 2. Управление (`/agent-steer`, `/agent-inject`)
+
+```
+Пользователь
+    │
+    ▼
+/agent-steer <text>
+    │
+    ▼
+AgentManager.steerAgent(id, text)
+    │
+    ├── 1. Находит AgentRecord по id
+    │
+    ├── 2. Добавляет pendingSteers
+    │
+    └── 3. AgentRunner получает steer через tool_call (steer_subagent)
+        │
+        └── LLM видит steer и адаптирует поведение
+```
+
+### 3. Получение результата (`/agent-result`)
+
+```
+Пользователь
+    │
+    ▼
+/agent-result <id>
+    │
+    ▼
+AgentManager.getRecord(id)
+    │
+    ├── status="completed" → показывает result
+    ├── status="running"  → показывает прогресс
+    └── status="queued"   → показывает что в очереди
+```
+
+### 4. Мониторинг (`/agent-view`)
+
+```
+Пользователь
+    │
+    ▼
+/agent-view <id>
+    │
+    ▼
+Режим мониторинга
+    │
+    ├── setInterval(1000ms) — чтение activity.responseText
+    │   - Выводит новые части текста в notify
+    │
+    ├── setInterval(500ms) — проверка статуса
+    │   - Если status != "running" → завершает мониторинг
+    │
+    └── setTimeout(300000ms) — таймаут 5 минут
+```
+
+---
+
+## 🧠 Система памяти (Memory)
+
+### SQLite База данных (`.pi/memory/unified.db`)
+
+```
+┌─────────────────────────────────────────────────────┐
+│              Memory Database (SQLite)                │
+├─────────────────────────────────────────────────────┤
+│                                                     │
+│  ┌──────────────┐  ┌──────────────────┐            │
+│  │ tool_outputs │  │ subagent_results │            │
+│  │ ────────────  │  │ ───────────────  │            │
+│  │ id            │  │ id               │            │
+│  │ tool_name     │  │ agent_type       │            │
+│  │ args          │  │ description      │            │
+│  │ output        │  │ result           │            │
+│  │ summary       │  │ timestamp        │            │
+│  │ timestamp     │  │ status           │            │
+│  │ size          │  │ tool_uses        │            │
+│  └──────────────┘  │ duration_ms      │            │
+│                     └──────────────────┘            │
+│                                                     │
+│  ┌──────────────┐  ┌──────────────────┐            │
+│  │session_facts │  │compressed_results│            │
+│  │ ────────────  │  │ ───────────────  │            │
+│  │ id            │  │ original_hash    │            │
+│  │ session_id    │  │ compressed       │            │
+│  │ fact_type     │  │ timestamp        │            │
+│  │   (decision   │  └──────────────────┘            │
+│  │    lesson     │                                  │
+│  │    preference │  ┌──────────────────┐            │
+│  │    architecture)│ │  FTS5 Index      │            │
+│  │    api)        │  │ ───────────────  │            │
+│  │ content        │  │ По всем текстовым│            │
+│  │ timestamp      │  │ полям всех таблиц│            │
+│  └──────────────┘  └──────────────────┘            │
+│                                                     │
+└─────────────────────────────────────────────────────┘
+```
+
+### Фаза 4A: Извлечение фактов (session-memory.ts)
+
+```
+session_before_compact
+    │
+    ▼
+SessionMemory.extractAndSaveFacts(messages)
+    │
+    ├── 1. Проходит по сообщениям сессии
+    │
+    ├── 2. Применяет FACT_PATTERNS (regex)
+    │   ├── decision: "решение", "выбрали", "decided to"
+    │   ├── lesson: "важно", "запомни", "mistake"
+    │   ├── preference: "предпочитаю", "хочу"
+    │   ├── architecture: "архитектура", "структура"
+    │   └── api: "endpoint", "route", "auth"
+    │
+    ├── 3. Фильтрует по длине (20-500 символов)
+    │
+    ├── 4. Проверяет дубликаты (hash)
+    │
+    └── 5. Сохраняет в session_facts
+        │
+        └── Используется при запуске субагентов (инжекция в промпт)
+```
+
+### Фаза 4B: Инжекция фактов в промпт
+
+```
+before_agent_start
+    │
+    ▼
+SessionMemory.getRelevantFacts(messages)
+    │
+    ├── 1. Считывает session_facts из БД
+    │
+    ├── 2. Выбирает релевантные (по типу сессии)
+    │
+    └── 3. Вставляет в system prompt как memoryBlock
+        │
+        └── Субагент получает контекст из предыдущих сессий
+```
+
+### Фаза 2C: Переопределение инструментов
+
+```
+registerTools()
+    │
+    ├── bash → executeCtxBash()
+    │   ├── Exec command (child_process.exec)
+    │   ├── Если output > 5000 символов → saveToolOutput() в БД
+    │   └── Возвращает preview + "💾 Полный вывод сохранён (ID: X)"
+    │
+    ├── read → executeCtxRead()
+    │   ├── Аналогично: large output → save в БД
+    │   └── offset/limit для чтения чанков
+    │
+    ├── grep → executeCtxBash() с ripgrep
+    │   ├── pattern, path, glob, ignoreCase, context, limit
+    │   └── Large output → save в БД
+    │
+    ├── find → executeCtxBash() с find
+    │   ├── pattern, path, limit
+    │   └── Large output → save в БД
+    │
+    ├── ls → executeCtxBash()
+    │   ├── path, options
+    │   └── Large output → save в БД
+    │
+    └── ctx_search → executeCtxSearch()
+        ├── FTS5 query по tool_outputs
+        ├── "id:<n>" → полный вывод по ID
+        └── limit по умолчанию
+```
+
+### Фаза 3: Сжатие результатов (result-compressor.ts)
+
+```
+compressResult(result, description)
+    │
+    ├── 1. Если < 2000 символов → пропуск
+    │
+    ├── 2. Проверка кэша (SHA256 hash)
+    │   ├── Если найден → возвращает cached
+    │   └── Иначе → вычисляет hash
+    │
+    ├── 3. LLM-сжатие
+    │   ├── Отправляет результат LLM
+    │   ├── Сжимает до ≤ 1000 символов
+    │   └── Сохраняет в compressed_results
+    │
+    └── 4. Fallback: эвристическое сжатие
+        ├── Убирает дубликаты
+        ├── Сокращает пробелы
+        └── Сохраняет ключевые части
+```
+
+---
+
+## 🎛 Управление агентами (AgentManager)
+
+```
+AgentManager
+    │
+    ├── agents: Map<id, AgentRecord>     # Все агенты
+    ├── queue: { id, args }[]             # Очередь агентов
+    ├── runningBackground: number         # Кол-во запущенных
+    ├── maxConcurrent: number (default: 4)
+    ├── cleanupInterval: setInterval(60s) # Очистка завершённых
+    │
+    ├── spawn(args)
+    │   ├── Если running < maxConcurrent → запускает сразу
+    │   └── Иначе → добавляет в queue
+    │
+    ├── drainQueue()
+    │   ├── Проверяет queue
+    │   └── Запускает агентов если есть место
+    │
+    ├── getRecord(id)
+    │   ├── Возвращает AgentRecord
+    │   └── status: queued | running | completed | steered | aborted | error
+    │
+    ├── steerAgent(id, text)
+    │   ├── Добавляет pendingSteers
+    │   └── Агент получит steer на следующем tool_call
+    │
+    ├── abortAgent(id)
+    │   ├── abortController.abort()
+    │   └── status = "aborted"
+    │
+    ├── abortAll()
+    │   └── Abort всех running агентов
+    │
+    ├── dispose()
+    │   └── clearInterval(cleanupInterval)
+    │
+    └── cleanup()
+        ├── Удаляет completed агентов из map
+        └── Запускает queue
+```
+
+---
+
+## 📊 UI Виджет (agent-widget.ts)
+
+```
+AgentWidget
+    │
+    ├── widgetInterval: setInterval(80ms)  # Обновление виджета
+    ├── finishedTurnAge: Map<agentId, turns>
+    ├── ERROR_LINGER_TURNS = 2             # Ошибочные linger 2 хода
+    │
+    ├── update()
+    │   ├── Фильтрует finished агентов
+    │   │   ├── completed → показ 1 ход
+    │   │   └── error/aborted → показ 2 хода
+    │   │
+    │   ├── Рендерит статус каждого агента
+    │   │   ├── running → "thinking…"
+    │   │   ├── completed → "✓ completed"
+    │   │   ├── error → "✗ error"
+    │   │   └── steered → "↻ steered"
+    │   │
+    │   └── Обновляет status bar в TUI
+    │
+    ├── onTurnStart()
+    │   ├── Инкрементирует finishedTurnAge
+    │   └── Запускает update()
+    │
+    └── markFinished(agentId)
+        ├── Добавляет в finishedTurnAge
+        └── Запускает update()
+```
+
+---
+
+## 🔄 Система событий (pi.on)
+
+### loop-police (обнаружение зацикливания)
+
+| Событие | Действие |
+|---------|----------|
+| `agent_start` | Сброс AgentState, новый sessionId |
+| `turn_start` | Сброс счётчиков цикла |
+| `message_update` | Мониторинг thinking-блока (character loops) |
+| `message_end` | Анализ semantic loops, tool loops |
+| `tool_call` | Отслеживание repeated tool calls |
+
+### pi-sub (управление субагентами)
+
+| Событие | Действие |
+|---------|----------|
+| `session_start` | Инициализация UI, clear completed agents, set session ID |
+| `session_before_switch` | clear completed agents |
+| `session_shutdown` | abortAll(), dispose() |
+| `tool_execution_start` | Обновление UI виджета |
+| `tool_result` | **Обрезка вывода до 50KB** |
+| `session_before_compact` | **Извлечение фактов из сообщений** |
+| `before_agent_start` | **Внедрение кастомного системного промпта** |
+
+### web-search-guidance (обучение модели)
+
+| Событие | Действие |
+|---------|----------|
+| `agent_start` | Сброс предупреждений |
+| `tool_call` | Валидация web_search (numResults ≤ 2) |
+| `tool_call` | Валидация fetch_content (maxLength ≤ 1000, offset) |
+| `tool_result` | Обновление состояния для детекции необходимости offset |
+
+---
+
+## 🧩 Типы агентов (agent-types.ts)
+
+```
+Встроенные агенты (default-agents.ts):
+├── coding:        # Кодирование (write, edit, bash)
+├── readonly:      # Только чтение (read, grep, find, ls)
+├── memory:        # Работа с памятью (read, write, edit)
+└── research:      # Исследование (bash, grep, find)
+
+Пользовательские агенты (.pi/agents/*.md):
+└── Загружаются из markdown файлов
+    - name, description, systemPrompt
+    - model, thinking, maxTurns
+    - tools (builtinToolNames, disallowedTools)
+    - extensions, skills
+    - isolation (worktree)
+```
+
+---
+
+## 🌊 Flow: Запуск субагента
+
+```
+1. Пользователь: /agent-bg coding "Рефактори auth"
+    │
+2. AgentManager.spawn()
+    │
+3. AgentRunner.runAgent()
+    │
+4. createAgentSession()
+    ├── Создаёт новую сессию
+    ├── Загружает extensions (по config)
+    ├── Загружает skills (по config)
+    └── Загружает prompts (по config)
+    │
+5. buildAgentPrompt()
+    ├── Если append: parent prompt + sub_agent_context + custom
+    ├── Если replace: только custom prompt
+    ├── Инжекция memoryBlock (из session memory)
+    ├── Инжекция preloaded skills
+    └── <active_agent name="coding"/> тег
+    │
+6. Agent loop
+    ├── LLM вызывает инструменты
+    ├── SUBAGENT_TOOL_NAMES перехватываются
+    │   ├── get_subagent_result → возвращает результат
+    │   └── steer_subagent → pendingSteers
+    │
+7. Результат
+    ├── Сжатие (если > 2000 символов)
+    ├── Сохранение в subagent_results
+    └── Обновление AgentRecord
+    │
+8. UI
+    ├── AgentWidget.update()
+    └── notify("Agent completed")
+```
+
+---
+
+## 📦 Зависимости
+
+| Пакет | Назначение |
+|-------|-----------|
+| `better-sqlite3` | SQLite база данных |
+| `@earendil-works/pi-coding-agent` | API расширения |
+| `@earendil-works/pi-tui` | TUI компоненты |
+| `@sinclair/typebox` | Схемы параметров |
+
+---
+
+## 🎯 Ключевые оптимизации
+
+1. **Экономия токенов**: Убраны descriptions из параметров инструментов
+2. **KV Cache**: Shared parent prompt в append режиме
+3. **Контекст**: Large outputs сохраняются в БД, показывается превью
+4. **Память**: Автоматическое извлечение фактов перед compaction
+5. **Сжатие**: LLM-сжатие больших результатов с кэшем
+6. **Конкурентность**: Максимум 4 одновременных субагента
+7. **loop-police**: Защита от зацикливания агентов
