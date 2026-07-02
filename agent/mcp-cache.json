@@ -1,0 +1,621 @@
+{
+  "version": 1,
+  "servers": {
+    "figma-mcp-go": {
+      "configHash": "87830fc081e26a815ff3e93b6cb17fc61ed95fdd4e247bd7c84f79d56bf27f18",
+      "tools": [
+        {
+          "name": "export_frames_to_pdf",
+          "description": "Export multiple frames as a single multi-page PDF file. Each frame becomes one page in order. Ideal for pitch decks, proposals, and slide exports.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeIds": {
+                "description": "Ordered list of frame node IDs to export as PDF pages, colon format e.g. '4029:12345'",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "outputPath": {
+                "description": "File path to write the PDF to, must end in .pdf (relative to working directory or absolute)",
+                "type": "string"
+              }
+            },
+            "required": [
+              "nodeIds",
+              "outputPath"
+            ]
+          }
+        },
+        {
+          "name": "export_tokens",
+          "description": "Export all design tokens (variables and paint styles) as JSON or CSS custom properties. Ideal for bridging Figma variables into your codebase.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "format": {
+                "description": "Output format: json (default) or css",
+                "type": "string"
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "get_annotations",
+          "description": "Get dev-mode annotations in the current document or scoped to a specific node. Returns annotation objects with label text, measurement type, and the ID of the annotated node. Omit nodeId to retrieve all annotations on the current page.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "description": "Optional — scope results to annotations on this node and its descendants, colon format e.g. '4029:12345'",
+                "type": "string"
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "get_design_context",
+          "description": "Get a depth-limited, token-efficient tree of the current selection or page. Use this instead of get_document when exploring large files. Supports detail levels (minimal/compact/full) and dedupe_components for pages heavy with repeated component instances.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "dedupe_components": {
+                "description": "When true, INSTANCE nodes are serialized compactly (mainComponentId + componentProperties + overrides array of differing text/nested content) and unique component definitions are collected once in a top-level componentDefs map. Highly token-efficient for screens with many repeated component instances.",
+                "type": "boolean"
+              },
+              "depth": {
+                "description": "How many levels deep to traverse (default 2)",
+                "type": "number"
+              },
+              "detail": {
+                "description": "Property verbosity: minimal (id/name/type/bounds only), compact (+fills/strokes/opacity), full (everything, default)",
+                "type": "string"
+              }
+            },
+            "required": []
+          }
+        },
+        {
+          "name": "get_document",
+          "description": "Get the full node tree of the current page (not the whole file — only the active page). Returns all nodes recursively and can be very large. Prefer get_design_context for exploration or when token efficiency matters.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_fonts",
+          "description": "List all fonts used in the current page, sorted by usage frequency. Useful for understanding typography without scanning all text nodes.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_local_components",
+          "description": "Get all components defined in the current Figma file.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_metadata",
+          "description": "Get metadata about the current Figma document: file name, pages, current page",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_node",
+          "description": "Get a single node by ID with full detail. Use get_nodes_info to fetch multiple nodes in one round-trip instead of calling this repeatedly. Node ID must be colon format e.g. '4029:12345', never hyphens.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "description": "Node ID in colon format e.g. '4029:12345'",
+                "type": "string"
+              }
+            },
+            "required": [
+              "nodeId"
+            ]
+          }
+        },
+        {
+          "name": "get_nodes_info",
+          "description": "Get full details for multiple nodes by ID in one round-trip. Prefer this over calling get_node repeatedly when you need several nodes.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeIds": {
+                "description": "List of node IDs in colon format e.g. ['4029:12345', '4029:67890']",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "nodeIds"
+            ]
+          }
+        },
+        {
+          "name": "get_pages",
+          "description": "List all pages in the document with their IDs and names. Lightweight alternative to get_document.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_reactions",
+          "description": "Get the prototype reactions defined on a node. Returns an array of reaction objects — each has a trigger (e.g. ON_CLICK, ON_HOVER, AFTER_TIMEOUT) and an actions array (navigate to node, open URL, go back, etc.). Use set_reactions to add or replace reactions, remove_reactions to delete them.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "description": "Node ID in colon format e.g. '4029:12345'",
+                "type": "string"
+              }
+            },
+            "required": [
+              "nodeId"
+            ]
+          }
+        },
+        {
+          "name": "get_selection",
+          "description": "Get the nodes currently selected in Figma. Returns an empty array if nothing is selected. Use get_design_context or get_node to retrieve deeper detail about a specific node by ID.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_styles",
+          "description": "Get all local styles in the document (paint, text, effect, and grid). Returns each style's ID, name, type, and properties. Use the style ID with apply_style_to_node or update_paint_style. For design tokens (variables), use get_variable_defs instead.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_variable_defs",
+          "description": "Get all local variable definitions: collections, modes, and values. Variables are Figma's design token system.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "get_viewport",
+          "description": "Get the current Figma viewport: scroll center, zoom level, and visible bounds.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        },
+        {
+          "name": "save_screenshots",
+          "description": "Export screenshots for multiple nodes and write them to the local filesystem. Returns file metadata (path, size, dimensions) — no base64 in the response.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "format": {
+                "description": "Default export format: PNG (default), SVG, JPG, or PDF",
+                "type": "string"
+              },
+              "items": {
+                "description": "List of {nodeId, outputPath, format?, scale?} objects",
+                "items": {
+                  "properties": {
+                    "format": {
+                      "description": "Export format: PNG, SVG, JPG, or PDF",
+                      "type": "string"
+                    },
+                    "nodeId": {
+                      "description": "Node ID in colon format e.g. '4029:12345'",
+                      "type": "string"
+                    },
+                    "outputPath": {
+                      "description": "File path to write the image to",
+                      "type": "string"
+                    },
+                    "scale": {
+                      "description": "Export scale for raster formats",
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "nodeId",
+                    "outputPath"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "scale": {
+                "description": "Default export scale for raster formats (default 2)",
+                "type": "number"
+              }
+            },
+            "required": [
+              "items"
+            ]
+          }
+        },
+        {
+          "name": "scan_nodes_by_types",
+          "description": "Find all nodes of specific types in a subtree, regardless of name. Use search_nodes instead when you need to filter by name.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "description": "Root node ID to scan from, colon format e.g. '4029:12345'",
+                "type": "string"
+              },
+              "types": {
+                "description": "Node types to find e.g. ['FRAME', 'COMPONENT', 'INSTANCE']",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "nodeId",
+              "types"
+            ]
+          }
+        },
+        {
+          "name": "scan_text_nodes",
+          "description": "Scan all TEXT nodes in a subtree and return their content. Shorthand for scan_nodes_by_types with ['TEXT'] — use when you only need text copy from a component or frame.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "nodeId": {
+                "description": "Root node ID to scan from, colon format e.g. '4029:12345'",
+                "type": "string"
+              }
+            },
+            "required": [
+              "nodeId"
+            ]
+          }
+        },
+        {
+          "name": "search_nodes",
+          "description": "Search for nodes by name substring and/or type within a subtree. Use this when you know (part of) the node name. Use scan_nodes_by_types when you want all nodes of a type regardless of name.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "limit": {
+                "description": "Maximum results to return (default: 50)",
+                "type": "number"
+              },
+              "nodeId": {
+                "description": "Scope search to this subtree (default: current page), colon format e.g. '4029:12345'",
+                "type": "string"
+              },
+              "query": {
+                "description": "Name substring to match (case-insensitive)",
+                "type": "string"
+              },
+              "types": {
+                "description": "Filter by Figma node type e.g. ['TEXT', 'FRAME', 'COMPONENT']",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "query"
+            ]
+          }
+        }
+      ],
+      "resources": [],
+      "cachedAt": 1783018319069
+    },
+    "unreal-mcp": {
+      "configHash": "7ebf1ebb1fcc77713ef9e395289b3e02ba0411ec7be4d1fc18499be37fa1779c",
+      "tools": [
+        {
+          "name": "deep_research",
+          "description": "Web research and GPS geocoding — no API key required. Use 'search' to look up any topic via DuckDuckGo and get real web results with titles, URLs, and snippets. Use 'fetch_page' to read the full content of any URL as clean markdown (great for Unreal Engine documentation, Dev Community posts, API references). Use 'geocode' to convert any place name or address into GPS coordinates (lat/lng) for use with the terrain_data tool. Use 'reverse_geocode' to convert GPS coordinates back into a human-readable place name. Typical deep research workflow: search → fetch_page on the best URL → synthesize. Typical terrain workflow: geocode 'Mount Fuji' → pass lat/lng to terrain_data.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "Action: search | fetch_page | geocode | reverse_geocode"
+              },
+              "query": {
+                "type": "string",
+                "description": "For search: topic or question. For geocode: place name or address (e.g. 'Mount Fuji', 'Grand Canyon South Rim')."
+              },
+              "url": {
+                "type": "string",
+                "description": "For fetch_page: the full URL to fetch and convert to markdown (e.g. https://dev.epicgames.com/documentation/...)."
+              },
+              "lat": {
+                "type": "string",
+                "description": "Latitude for reverse_geocode action."
+              },
+              "lng": {
+                "type": "string",
+                "description": "Longitude for reverse_geocode action."
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        },
+        {
+          "name": "execute_python_code",
+          "description": "Execute Python code in Unreal Engine. IMPORTANT: Use 'import unreal' (lowercase). For subsystems use: unreal.get_editor_subsystem(unreal.LevelEditorSubsystem). Returns stdout, stderr, and execution status.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Python code to execute. Must start with 'import unreal' (lowercase). For editor subsystems use unreal.get_editor_subsystem()"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        },
+        {
+          "name": "discover_python_module",
+          "description": "Discover contents of a Python module. IMPORTANT: The module name is 'unreal' (lowercase, not 'Unreal'). Use this before execute_python_code to find available classes/functions.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "module_name": {
+                "type": "string",
+                "description": "Name of the Python module. Use 'unreal' (lowercase) for Unreal Engine APIs"
+              },
+              "name_filter": {
+                "type": "string",
+                "description": "Filter results by name substring (case-insensitive). E.g. 'Blueprint' to find Blueprint-related items"
+              },
+              "max_items": {
+                "type": "string",
+                "description": "Maximum items to return (default 100, 0 = unlimited). Use lower values to prevent context blowout"
+              },
+              "include_classes": {
+                "type": "string",
+                "description": "Include classes in results (default true)"
+              },
+              "include_functions": {
+                "type": "string",
+                "description": "Include functions in results (default true)"
+              },
+              "case_sensitive": {
+                "type": "string",
+                "description": "Whether filtering is case-sensitive (default false)"
+              }
+            },
+            "required": [
+              "module_name"
+            ]
+          }
+        },
+        {
+          "name": "discover_python_class",
+          "description": "Discover methods and attributes of one or MORE Python classes in a single call. PREFER batching: class_name accepts a comma-separated list ('unreal.MaterialService, unreal.WidgetService') and method_filter ORs keywords with '|' ('create|delete|compile'). One batched call replaces several single-class calls.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "class_name": {
+                "type": "string",
+                "description": "Fully qualified class name (e.g. 'unreal.BlueprintService'). Pass several at once as a comma-separated list or JSON array (e.g. 'unreal.ComponentTypeInfo, unreal.ComponentPropertyInfo') — the response then contains a 'classes' array with one entry per class"
+              },
+              "method_filter": {
+                "type": "string",
+                "description": "Filter methods by name substring (case-insensitive). OR several keywords in one call with '|' or ',' (e.g. 'variable|component|compile' matches any of the three)"
+              },
+              "max_methods": {
+                "type": "string",
+                "description": "Maximum methods to return (default 0 = unlimited). Use to limit large class results"
+              },
+              "include_inherited": {
+                "type": "string",
+                "description": "Include inherited methods (default false). Set true for all methods including base class"
+              },
+              "include_private": {
+                "type": "string",
+                "description": "Include private methods starting with _ (default false)"
+              }
+            },
+            "required": [
+              "class_name"
+            ]
+          }
+        },
+        {
+          "name": "discover_python_function",
+          "description": "Get signature and documentation for a Python function.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "function_name": {
+                "type": "string",
+                "description": "Fully qualified function name (e.g. 'unreal.load_asset'). Alias: function_path"
+              }
+            },
+            "required": [
+              "function_name"
+            ]
+          }
+        },
+        {
+          "name": "list_python_subsystems",
+          "description": "List all Unreal Engine editor subsystems. Access via: unreal.get_editor_subsystem(unreal.SubsystemName). Example: subsys = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "name": "terrain_data",
+          "description": "Generate heightmaps, map images, and water feature data from real-world terrain. Requires an active VibeUE API key. Actions: generate_heightmap, preview_elevation, get_map_image, list_styles, get_water_features. IMPORTANT: Use the 'resolution' parameter to match your landscape resolution. Heightmap workflow: 1) preview_elevation for suggested settings (returns suggestedZScale, suggestedXYScales by resolution). 2) generate_heightmap with resolution matching your landscape. 3) Import via ULandscapeService.import_heightmap() (auto-creates a matching landscape if missing, but explicit create_landscape is recommended for real-world XY/Z scale control). CRITICAL: Use suggestedXYScales[resolution] as the landscape X and Y scale — do NOT use the default 100. Water workflow (after heightmap is imported): 1) get_water_features with the same lng/lat/map_size — saves JSON to Saved/Terrain/ and returns a summary with the file path. 2) Read the saved JSON file: json_str = open(file_path).read() 3) Water bodies use 'ue5_rings', waterways use 'ue5_points'. Both are origin-centered.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "Action: generate_heightmap | preview_elevation | get_map_image | list_styles | get_water_features"
+              },
+              "lng": {
+                "type": "string",
+                "description": "Longitude of center point (e.g. -122.4194 for San Francisco)"
+              },
+              "lat": {
+                "type": "string",
+                "description": "Latitude of center point (e.g. 37.7749 for San Francisco)"
+              },
+              "map_size": {
+                "type": "string",
+                "description": "Map size in km (default 17.28). Use the same value for heightmap and get_water_features."
+              },
+              "format": {
+                "type": "string",
+                "description": "Output format for generate_heightmap: png (default), raw, zip"
+              },
+              "resolution": {
+                "type": "string",
+                "description": "Output resolution NxN pixels for generate_heightmap. MUST match landscape resolution. Use ULandscapeService.calculate_landscape_resolution() to compute. Common: 505 (8x8,63,1), 1009 (8x8,63,2 or 16x16,63,1), 1017 (8x8,127,1). Default: 1081"
+              },
+              "base_level": {
+                "type": "string",
+                "description": "Base elevation offset in meters (default 0; use preview_elevation for good value)"
+              },
+              "height_scale": {
+                "type": "string",
+                "description": "Height scale percentage 1-250 (default 100; use preview_elevation for good value)"
+              },
+              "water_depth": {
+                "type": "string",
+                "description": "Water depth in Cities: Skylines units (default 40)"
+              },
+              "gravity_center": {
+                "type": "string",
+                "description": "Water flow direction 0-13: 0=disabled, 1=center, 2=N, 3=NE, 4=E, 5=SE, 6=S, 7=SW, 8=W, 9=NW, 10=north side, 11=east side, 12=south side, 13=west side"
+              },
+              "level_correction": {
+                "type": "string",
+                "description": "Elevation curve style 0-9: 0=none, 2=coastline, 3=aggressive coastline (default 0)"
+              },
+              "blur_passes": {
+                "type": "string",
+                "description": "Smoothing passes for plains (default 10)"
+              },
+              "blur_post_passes": {
+                "type": "string",
+                "description": "Post-sharpening passes (default 2)"
+              },
+              "sharpen": {
+                "type": "string",
+                "description": "Apply sharpening kernel (default true)"
+              },
+              "draw_streams": {
+                "type": "string",
+                "description": "Re-etch waterways after smoothing (default true)"
+              },
+              "stream_depth": {
+                "type": "string",
+                "description": "Stream depth in meters (default 7)"
+              },
+              "plains_height": {
+                "type": "string",
+                "description": "Height threshold for plains smoothing in meters (default 140)"
+              },
+              "style": {
+                "type": "string",
+                "description": "Map image style for get_map_image: satellite-v9, outdoors-v11, streets-v11, light-v10, dark-v10"
+              },
+              "save_path": {
+                "type": "string",
+                "description": "File path to save output. Default: <ProjectDir>/Saved/Terrain/"
+              }
+            },
+            "required": [
+              "action"
+            ]
+          }
+        },
+        {
+          "name": "list_toolsets",
+          "description": "List all available toolsets with names and descriptions.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {}
+          }
+        },
+        {
+          "name": "describe_toolset",
+          "description": "Get detailed information about a toolset including all tool names, descriptions, and input schemas.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "toolset_name": {
+                "type": "string",
+                "description": "Name of the toolset to describe. Use list_toolsets to see available names."
+              }
+            },
+            "required": [
+              "toolset_name"
+            ]
+          }
+        },
+        {
+          "name": "call_tool",
+          "description": "Call a tool by name. Provide toolset_name to call a toolset tool, or omit it to call a top-level MCP tool. Use list_toolsets and describe_toolset to discover available tools and their input schemas.",
+          "inputSchema": {
+            "type": "object",
+            "properties": {
+              "toolset_name": {
+                "type": "string",
+                "description": "Optional. Name of the toolset containing the tool. Omit to call a top-level MCP tool. Use list_toolsets to discover toolset names."
+              },
+              "tool_name": {
+                "type": "string",
+                "description": "Name of the tool to call, without toolset prefix. Use describe_toolset to discover tool names and input schemas."
+              },
+              "arguments": {
+                "type": "object",
+                "description": "Arguments to pass to the tool. Must match the tool's input schema. Defaults to an empty object."
+              }
+            },
+            "required": [
+              "tool_name"
+            ]
+          }
+        }
+      ],
+      "resources": [],
+      "cachedAt": 1783015497799
+    }
+  }
+}

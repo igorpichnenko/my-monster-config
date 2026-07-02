@@ -11,11 +11,12 @@
  * - WAL mode для лучшей производительности при параллельном доступе
  * - FTS5 для полнотекстового поиска
  * - Автоматическая миграция схемы при изменениях
+ * - Поиск корневого .pi вверх по дереву (как git ищет .git)
  */
 
 import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
 const SCHEMA_VERSION = 1;
@@ -58,6 +59,31 @@ export interface CompressedResult {
   timestamp: number;
 }
 
+/**
+ * Найти корневую директорию проекта (аналог того, как git ищет .git).
+ * Ищет вверх по дереву директорий, пока не найдёт .pi.
+ * 
+ * Примеры:
+ * - /home/user/project/.pi/memory → /home/user/project
+ * - /home/user/project/.pi/.pi/memory → /home/user/project (НЕ .pi)
+ * - /home/user/project/src/file.ts → /home/user/project (если есть .pi)
+ */
+function findProjectRoot(startDir: string): string {
+  let current = resolve(startDir);
+  const root = resolve("/");
+  
+  while (current !== root) {
+    const piDir = join(current, ".pi");
+    if (existsSync(piDir)) {
+      return current;
+    }
+    current = dirname(current);
+  }
+  
+  // Если не нашли — используем стартовую директорию
+  return startDir;
+}
+
 export class MemoryDatabase {
   private db: Database.Database;
   private static instance: MemoryDatabase | null = null;
@@ -79,10 +105,14 @@ export class MemoryDatabase {
     this.initSchema();
   }
 
-  /** Singleton: получить экземпляр БД для проекта. */
+  /** 
+   * Singleton: получить экземпляр БД для проекта.
+   * Автоматически находит корневую директорию .pi (как git ищет .git).
+   */
   static getInstance(projectDir: string = process.cwd()): MemoryDatabase {
     if (!MemoryDatabase.instance) {
-      const dbPath = join(projectDir, DB_RELATIVE_PATH);
+      const projectRoot = findProjectRoot(projectDir);
+      const dbPath = join(projectRoot, DB_RELATIVE_PATH);
       MemoryDatabase.instance = new MemoryDatabase(dbPath);
     }
     return MemoryDatabase.instance;
@@ -299,7 +329,7 @@ export class MemoryDatabase {
     `).all(query, limit) as ToolOutput[];
   }
 
-    getRecentToolOutputs(limit: number = 10): ToolOutput[] {
+  getRecentToolOutputs(limit: number = 10): ToolOutput[] {
     return this.db.prepare(`
       SELECT * FROM tool_outputs
       ORDER BY timestamp DESC
@@ -400,7 +430,7 @@ export class MemoryDatabase {
     `).all(query, limit) as SessionFact[];
   }
 
-/** Поиск по фактам через LIKE (для частичных совпадений). */
+  /** Поиск по фактам через LIKE (для частичных совпадений). */
   searchFactsLike(pattern: string, limit: number = 10): SessionFact[] {
     return this.db.prepare(`
       SELECT * FROM session_facts

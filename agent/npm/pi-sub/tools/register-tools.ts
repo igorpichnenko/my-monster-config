@@ -5,6 +5,7 @@
  * - Убраны description из параметров (экономия ~100 токенов)
  * - ctx_stats закомментирован (экономия ~50-80 токенов)
  * - Добавлена подсказка Ctrl+O для разворачивания результатов
+ * - ctx_search поддерживает expanded через Ctrl+O
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -261,7 +262,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     },
   }));
 
-  // ---- ctx_search ----
+  // ---- ctx_search (с поддержкой expanded через Ctrl+O) ----
   pi.registerTool(defineTool({
     name: "ctx_search",
     label: "Search Context DB",
@@ -276,14 +277,42 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       return new Text("▸ " + theme.fg("toolTitle", theme.bold("ctx_search")) + " " + theme.fg("dim", args.query.slice(0, 50)), 0, 0);
     },
     
-    renderResult(result, { isPartial }, theme) {
+    renderResult(result, { expanded, isPartial }: any, theme) {
       const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+      
       if (isPartial) {
         return new Text(theme.fg("accent", "⠙") + " searching…", 0, 0);
       }
+      
+      // Если текст пустой
+      if (!text || text.length === 0) {
+        return new Text(theme.fg("warning", "⚠") + " no results", 0, 0);
+      }
+      
       const match = text.match(/Found (\d+) result/);
       const count = match ? match[1] : "?";
-      return new Text(theme.fg("success", "✓") + ` found ${count} results`, 0, 0);
+      
+      // Если развёрнуто — показываем полный результат
+      if (expanded) {
+        return new Text(
+          theme.fg("success", `✓ found ${count} results\n\n`) + 
+          theme.fg("dim", text),
+          0,
+          0
+        );
+      }
+      
+      // Свёрнуто — показываем превью (первые 3 строки)
+      const previewLines = text.split("\n").slice(0, 3).join("\n");
+      const firstLine = text.split("\n")[0] || "";
+      
+      return new Text(
+        theme.fg("success", `✓ found ${count} results`) +
+          theme.fg("dim", ` — ${firstLine.slice(0, 80)}`) +
+          theme.fg("muted", EXPAND_HINT),
+        0,
+        0
+      );
     },
     
     execute: async (toolCallId, params, signal, onUpdate, ctx) => {
