@@ -1,7 +1,644 @@
-# Pi Commands & Tools & Background Processes Documentation
 
-> Автоматически сгенерированный документ по всем командам, инструментам и фоновым процессам pi.
-> Последнее обновление: 2026-07-02
+
+# Pi-Sub: Система субагентов с долгосрочной памятью
+
+> Расширение для pi-coding-agent, реализующее систему субагентов, контекстную память и оптимизацию вывода инструментов.
+
+---
+
+## 🎯 Что даёт pi-sub
+
+### Основные преимущества
+
+| Проблема | Решение pi-sub | Результат |
+|----------|----------------|-----------|
+| **Переполнение контекста** | Большие выводы (>5000 символов) автоматически сохраняются в БД, модель получает только summary | ✅ Контекст остаётся компактным |
+| **Потеря информации** | Все выводы инструментов индексируются в SQLite + FTS5 | ✅ Можно найти любой прошлый вывод через `ctx_search` |
+| **Долгие задачи** | Субагенты выполняются в фоне, не блокируя основной агент | ✅ Параллельная работа над несколькими задачами |
+| **Забывание между сессиями** | Автоматическое извлечение фактов из сессий (решения, уроки, предпочтения) | ✅ Модель помнит контекст из прошлых сессий |
+| **Зацикливание агентов** | Loop-police детектит повторяющиеся действия и прерывает их | ✅ Экономия токенов и времени |
+| **Огромный system prompt** | Кастомный промпт с memory policy (~300 токенов вместо ~2400) | ✅ Быстрый первый ответ |
+
+### Подход
+
+**Контекст-сохраняющие инструменты:**
+```
+bash/read/grep/find/ls → если вывод > 5000 символов:
+  ├── Полный вывод → SQLite БД (.pi/memory/unified.db)
+  ├── Summary → возвращается модели
+  └── ID → для поиска через ctx_search "id:<n>"
+```
+
+**Субагенты:**
+```
+/agent-bg <prompt> → фоновый агент с изолированной сессией
+  ├── Использует те же инструменты (с сохранением в БД)
+  ├── Результат инжектится в родителя (или скрывается с --no-inject)
+  └── Можно управлять: /agent-steer, /agent-result, /agent-view
+```
+
+**Долгосрочная память:**
+```
+session_before_compact → извлечение фактов (решения, уроки, API)
+  ├── Сохраняются в session_facts
+  ├── Инжектируются в промпт новых субагентов
+  └── Доступны через ctx_search
+```
+
+---
+
+## 🚀 Быстрый старт
+
+### Установка
+
+```bash
+cd ~/.pi/agent/npm/pi-sub
+npm install
+```
+
+### Основные команды
+
+```bash
+# Запустить субагент в фоне
+/agent-bg проанализируй структуру проекта
+
+# Запустить без инжекта результата в родителя
+/agent-bg --no-inject найди все TODO в коде
+
+# Получить результат
+/agent-result <id>
+
+# Поиск по сохранённым выводам
+ctx_search "registerCommand"
+ctx_search "id:42"  # полный вывод по ID
+
+# Статистика памяти
+/memory-stats
+```
+
+### Пример использования
+
+```
+Пользователь: /agent-bg найди все файлы с расширением .ts в проекте
+
+Agent started: abc123
+Use /agent-status abc123 to check progress.
+
+[через 5 секунд]
+
+[subagent-result]
+[Subagent "найди все файлы..." (ID: abc123) completed]
+
+Найдено 127 файлов TypeScript:
+- src/tools/register-tools.ts (450 строк)
+- src/agent-manager.ts (320 строк)
+...
+
+💡 Полный список сохранён в БД (ID: 42). Используйте ctx_search "id:42" для просмотра.
+```
+
+---
+
+## 📋 Основные возможности
+
+### 1. Контекст-сохраняющие инструменты
+
+Переопределяют стандартные инструменты pi-coding-agent:
+
+| Инструмент | Порог сохранения | Что сохраняется |
+|------------|------------------|-----------------|
+| `bash` | > 5000 символов | Полный вывод команды |
+| `read` | > 5000 символов | Содержимое файла |
+| `grep` | > 5000 символов | Результаты поиска |
+| `find` | > 5000 символов | Список файлов |
+| `ls` | > 5000 символов | Содержимое директории |
+
+**Дополнительный инструмент:**
+- `ctx_search` — полнотекстовый поиск по сохранённым выводам (FTS5)
+
+### 2. Субагенты
+
+**Типы агентов:**
+- `coding` — кодирование (write, edit, bash)
+- `readonly` — только чтение (read, grep, find, ls)
+- `memory` — работа с памятью (read, write, edit)
+- `research` — исследование (bash, grep, find)
+
+**Управление:**
+```bash
+/agent-bg [--no-inject] <prompt>  # Запуск в фоне
+/agent-steer <id> <message>       # Отправить сообщение
+/agent-result <id>                # Получить результат
+/agent-inject <id>                # Инжект в контекст родителя
+/agent-resume <id> <prompt>       # Возобновить с новым промптом
+/agent-view <id>                  # Мониторинг в реальном времени
+/agent-status <id>                # Статус и прогресс
+```
+
+**Параллелизм:**
+- Максимум 4 одновременных субагента
+- Очередь для остальных
+- Автоматическая очистка завершённых (каждые 60 сек)
+
+### 3. Долгосрочная память
+
+**Автоматическое извлечение фактов:**
+- Перед сжатием контекста (`session_before_compact`)
+- Паттерны: решения, уроки, предпочтения, архитектура, API
+- Сохраняются в `session_facts`
+
+**Использование:**
+- Инжекция релевантных фактов в промпт субагентов
+- Поиск через `ctx_search`
+- Управление через `/memory-*` команды
+
+### 4. Защита от зацикливания (loop-police)
+
+**Детекция:**
+- Character-level loops (повторяющиеся символы в thinking)
+- Semantic loops (повторяющиеся мысли, similarity > 0.7)
+- Tool loops (одинаковые вызовы инструментов подряд)
+- Stagnation (отсутствие прогресса за 5 ходов)
+
+**Действия:**
+- Обрезка thinking-блока
+- Блокировка повторяющихся tool calls
+- Recovery mode (3 хода с повышенными лимитами)
+
+---
+
+## 🔧 Инструменты (подробно)
+
+### Переопределённые инструменты
+
+#### `bash`
+```typescript
+bash({ 
+  command: "npm test", 
+  timeout: 30000  // мс, опционально
+})
+```
+- Если вывод > 5000 символов → сохраняется в БД
+- Возвращает summary + ID для поиска
+
+#### `read`
+```typescript
+read({ 
+  path: "src/index.ts",
+  offset: 0,   // 0-based, опционально
+  limit: 100   // строк, опционально
+})
+```
+- Поддержка offset/limit для больших файлов
+- Авто-сохранение в БД
+
+#### `grep`
+```typescript
+grep({ 
+  pattern: "TODO",
+  path: "src/",
+  options: "-rn"  // опционально
+})
+```
+- Автоматически исключает `.git`
+- Использует `rg` если установлен (быстрее)
+
+#### `find`
+```typescript
+find({ 
+  pattern: "*.ts",
+  path: ".",
+  limit: 1000
+})
+```
+- Автоматически исключает `.git`
+- Использует `fdfind` если установлен (быстрее)
+
+#### `ls`
+```typescript
+ls({ 
+  path: ".",
+  options: "-la"  // опционально
+})
+```
+
+### Новый инструмент
+
+#### `ctx_search`
+```typescript
+ctx_search({ 
+  query: "registerCommand",  // FTS5 запрос
+  limit: 10                  // опционально
+})
+
+// Получить полный вывод по ID
+ctx_search({ query: "id:42" })
+```
+
+**Возможности:**
+- Полнотекстовый поиск (FTS5) по всем сохранённым выводам
+- Специальный запрос `id:<n>` для получения полного вывода
+- Поиск по tool_name, args, output, summary
+
+---
+
+## ⚙️ Команды (подробно)
+
+### Управление субагентами
+
+#### `/agent-bg [--no-inject] <prompt>`
+Запустить субагент в фоне.
+
+**Параметры:**
+- `--no-inject` или `--silent` — не инжектить результат в родителя (только показать в UI)
+- `<prompt>` — задача для субагента
+
+**Пример:**
+```bash
+/agent-bg проанализируй архитектуру проекта
+/agent-bg --no-inject найди все баги в коде
+```
+
+#### `/agent-steer <id> <message>`
+Отправить сообщение работающему субагенту.
+
+**Пример:**
+```bash
+/agent-steer abc123 Сосредоточься на тестах
+```
+
+#### `/agent-result <id>`
+Получить результат завершённого субагента.
+
+#### `/agent-inject <id>`
+Инжектить результат субагента в контекст родителя (если был `--no-inject`).
+
+#### `/agent-resume <id> <prompt>`
+Возобновить субагент с новым промптом.
+
+#### `/agent-view <id>`
+Мониторинг вывода субагента в реальном времени (таймаут 5 минут).
+
+#### `/agent-status <id>`
+Показать статус, tool uses, turns, duration.
+
+### Управление памятью
+
+#### `/memory-stats`
+Статистика БД: количество tool outputs, subagent results, session facts, размер.
+
+#### `/memory-search <query>`
+Поиск по фактам из сессий.
+
+#### `/memory-add <type> <content>`
+Добавить факт вручную.
+
+**Типы:**
+- `decision` — решения
+- `lesson` — уроки
+- `preference` — предпочтения
+- `architecture` — архитектурные заметки
+- `api` — API детали
+
+#### `/memory-purge [days]`
+Очистить старые факты (по умолчанию 30 дней).
+
+#### `/memory-test`
+Тестовые операции с БД.
+
+### Другие команды
+
+#### `/agents`
+Меню выбора типа агента.
+
+#### `/loop-police [reset|set]`
+Управление loop-police.
+
+**Пример:**
+```bash
+/loop-police                    # Статус
+/loop-police reset all          # Сброс всех состояний
+/loop-police set REPEATED_TOOL_CALL_LIMIT=5
+```
+
+---
+
+## 🧠 Система памяти
+
+### Архитектура БД
+
+```
+.pi/memory/unified.db (SQLite + WAL mode)
+│
+├── tool_outputs
+│   ├── id, tool_name, args
+│   ├── output (полный вывод)
+│   ├── summary (краткое описание)
+│   ├── timestamp, size
+│   └── FTS5 index (tool_outputs_fts)
+│
+├── subagent_results
+│   ├── id, agent_type, description
+│   ├── result (результат субагента)
+│   ├── status, tool_uses, duration_ms
+│   ├── timestamp
+│   └── FTS5 index (subagent_results_fts)
+│
+├── session_facts
+│   ├── id, session_id
+│   ├── fact_type (decision|lesson|preference|architecture|api)
+│   ├── content
+│   ├── timestamp
+│   └── FTS5 index (session_facts_fts)
+│
+└── compressed_results
+    ├── original_hash (SHA256)
+    ├── compressed (сжатый результат)
+    └── timestamp
+```
+
+### Поиск корневого `.pi`
+
+БД всегда создаётся в **корневом** `.pi/memory/`, даже если проект открыт в поддиректории:
+
+```
+/home/user/project/
+├── .pi/
+│   └── memory/
+│       └── unified.db  ← БД здесь
+└── src/
+    └── file.ts
+
+Если открыть /home/user/project/src/ → БД всё равно в /home/user/project/.pi/memory/
+```
+
+### Извлечение фактов
+
+**Паттерны:**
+```typescript
+decision: "решение", "выбрали", "decided to", "решили"
+lesson: "важно", "запомни", "mistake", "ошибка"
+preference: "предпочитаю", "хочу", "лучше"
+architecture: "архитектура", "структура", "модуль"
+api: "endpoint", "route", "auth", "API"
+```
+
+**Процесс:**
+1. Перед `session_before_compact` анализируются сообщения
+2. Применяются regex-паттерны
+3. Фильтрация по длине (20-500 символов)
+4. Проверка дубликатов (hash)
+5. Сохранение в `session_facts`
+
+### Инжекция в промпт
+
+При запуске субагента:
+```typescript
+const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
+const memoryBlock = `# Session Memory\n${relevantFacts.join("\n")}`;
+// Инжектится в system prompt субагента
+```
+
+---
+
+## 🏗 Архитектура
+
+### Структура файлов
+
+```
+pi-sub/
+├── index.ts                    # Точка входа, инициализация
+├── agent-manager.ts            # Управление жизненным циклом
+├── agent-runner.ts             # Ядро выполнения
+├── agent-types.ts              # Реестр типов агентов
+├── custom-agents.ts            # Загрузка из .pi/agents/
+├── default-agents.ts           # Встроенные агенты
+├── prompts.ts                  # Сборка системных промптов
+├── commands/
+│   ├── agent-commands.ts       # /agent-* команды
+│   ├── memory-commands.ts      # /memory-* команды
+│   └── agents-menu.ts          # /agents
+├── tools/
+│   └── register-tools.ts       # Переопределение инструментов
+├── memory/
+│   ├── database.ts             # SQLite + FTS5
+│   ├── session-memory.ts       # Извлечение фактов
+│   └── result-compressor.ts    # Сжатие результатов
+├── context-tools/
+│   ├── ctx-bash.ts             # bash с сохранением
+│   ├── ctx-read.ts             # read с сохранением
+│   ├── ctx-search.ts           # ctx_search (FTS5)
+│   └── utils/
+│       ├── analyzers.ts        # Анализаторы вывода
+│       └── summary.ts          # Генерация summary
+├── ui/
+│   └── agent-widget.ts         # Виджет статуса (80ms)
+└── renderers/
+    └── message-renderers.ts    # Кастомный рендеринг
+```
+
+### Жизненный цикл субагента
+
+```
+/agent-bg <prompt>
+    │
+    ▼
+AgentManager.spawn()
+    ├── Создаёт AgentRecord (id, type, status="queued")
+    ├── Если running < maxConcurrent → запускает сразу
+    └── Иначе → добавляет в очередь
+    │
+    ▼
+AgentRunner.runAgent()
+    ├── Создаёт сессию (createAgentSession)
+    ├── Собирает system prompt (prompts.ts)
+    │   ├── Инжекция memoryBlock (факты из session memory)
+    │   └── Кастомный промпт с memory policy
+    ├── Запускает agent loop
+    │   ├── LLM вызывает инструменты
+    │   └── Инструменты сохраняют большие выводы в БД
+    └── Собирает результат
+    │
+    ▼
+onComplete callback
+    ├── Сохраняет результат в subagent_results
+    ├── Если !noInject → инжектит в родителя
+    └── Обновляет UI виджет
+```
+
+### Система событий
+
+| Событие | Источник | Действие |
+|---------|----------|----------|
+| `session_start` | pi-sub | Инициализация UI, set session ID |
+| `session_before_switch` | pi-sub | Очистка завершённых агентов |
+| `session_shutdown` | pi-sub | Abort всех, dispose |
+| `tool_execution_start` | pi-sub | Обновление UI |
+| `tool_result` | pi-sub | Обрезка вывода до 50KB |
+| `session_before_compact` | pi-sub | Извлечение фактов |
+| `before_agent_start` | pi-sub | Кастомный system prompt |
+| `agent_start` | loop-police | Сброс состояния |
+| `turn_start` | loop-police | Сброс счётчиков |
+| `message_update` | loop-police | Мониторинг thinking |
+| `message_end` | loop-police | Анализ loops |
+| `tool_call` | loop-police | Отслеживание repeated calls |
+
+### Фоновые процессы
+
+| Процесс | Период | Действие |
+|---------|--------|----------|
+| AgentManager cleanup | 60 сек | Очистка завершённых агентов |
+| AgentWidget update | 80 мс | Обновление виджета статуса |
+| Agent status polling | 1 сек / 500 мс | Мониторинг вывода / статуса |
+
+---
+
+## 📊 Статистика
+
+| Категория | Количество |
+|-----------|------------|
+| Переопределённые инструменты | 5 (bash, read, grep, find, ls) |
+| Новые инструменты | 1 (ctx_search) |
+| Команды субагентов | 7 |
+| Команды памяти | 5 |
+| События pi-sub | 7 |
+| События loop-police | 5 |
+| Фоновые процессы | 3 |
+
+---
+
+## 🔍 Отладка
+
+### Просмотр БД
+
+```bash
+# Размер БД
+ls -lh .pi/memory/unified.db
+
+# Количество записей
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM tool_outputs;"
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM subagent_results;"
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM session_facts;"
+
+# Последние записи
+sqlite3 .pi/memory/unified.db "SELECT id, tool_name, size FROM tool_outputs ORDER BY timestamp DESC LIMIT 5;"
+```
+
+### Логи
+
+В консоли pi:
+```
+[pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Size: 12.5 MB
+[pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
+[pi-sub] 🗜️ Agent abc123: compressed (5000 → 950 chars)
+[pi-sub] 🔇 Agent abc123: no-inject mode — showing result in UI only
+[pi-sub] ✂️ Truncated large tool output to prevent context overflow
+```
+
+### Тестирование инструментов
+
+```bash
+# Большой вывод (должен сохраниться в БД)
+bash "seq 1 10000"
+
+# Поиск по сохранённым
+ctx_search "seq"
+
+# Получить полный вывод
+ctx_search "id:1"
+```
+
+---
+
+## 📝 Разработка
+
+### Добавление нового инструмента
+
+```typescript
+// tools/register-tools.ts
+pi.registerTool(defineTool({
+  name: "my_tool",
+  label: "My Tool",
+  description: "Описание инструмента",
+  parameters: Type.Object({
+    param1: Type.String(),
+  }),
+  
+  renderCall(args, theme) {
+    return new Text("▸ " + theme.fg("toolTitle", theme.bold("my_tool")), 0, 0);
+  },
+  
+  renderResult(result, opts, theme) {
+    return renderSavedToDb(result, opts, theme, "running");
+  },
+  
+  execute: async (toolCallId, params, signal, onUpdate, ctx) => {
+    const result = await doSomething(params.param1);
+    return { content: [{ type: "text", text: result }] };
+  },
+}));
+```
+
+### Добавление новой команды
+
+```typescript
+// commands/my-commands.ts
+pi.registerCommand("mycommand", {
+  description: "Описание команды",
+  handler: async (args, ctx) => {
+    ctx.ui.notify(`Hello ${args || "world"}!`, "info");
+  },
+});
+```
+
+### Добавление подписки на событие
+
+```typescript
+// index.ts
+pi.on("tool_call", (event, ctx) => {
+  if (event.toolName === "bash") {
+    console.log("Bash called:", event.input.command);
+  }
+});
+```
+
+---
+
+## 📦 Зависимости
+
+| Пакет | Версия | Назначение |
+|-------|--------|-----------|
+| `better-sqlite3` | ^11.8.2 | SQLite база данных |
+| `@earendil-works/pi-coding-agent` | >=0.74.0 | API расширения (peer) |
+| `@earendil-works/pi-tui` | * | TUI компоненты (peer) |
+| `@sinclair/typebox` | ^0.34.33 | Схемы параметров |
+| `nanoid` | ^5.1.5 | Генерация ID |
+
+---
+
+## 🎯 Ключевые оптимизации
+
+1. **Экономия токенов**: Убраны descriptions из параметров инструментов (~100 токенов)
+2. **Кастомный system prompt**: ~300 токенов вместо ~2400 (экономия 88%)
+3. **Контекст-сохраняющие инструменты**: Большие выводы не забивают контекст
+4. **FTS5 поиск**: Мгновенный поиск по всем сохранённым выводам
+5. **Автоматическая память**: Факты извлекаются без участия пользователя
+6. **Параллелизм**: До 4 субагентов одновременно
+7. **Loop detection**: Защита от зацикливания и бесконечных циклов
+8. **Динамические пути**: БД всегда в корневом `.pi/memory/`
+
+---
+
+## 📖 Источники
+
+- **Исходный код**: `~/.pi/agent/npm/pi-sub/`
+- **Документация pi**: `~/.nvm/versions/node/v22.23.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/`
+- **Примеры**: `~/.nvm/versions/node/v22.23.0/lib/node_modules/@earendil-works/pi-coding-agent/examples/`
+
+---
+
+
+# Pi Commands & Tools & Background Processes Documentation
 
 ---
 
