@@ -1,0 +1,23 @@
+{
+  "name": "pi-sub",
+  "version": "0.1",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.74.0",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": ">=0.74.0"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "^0.34.49",
+    "better-sqlite3": "^12.11.1",
+    "nanoid": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "loop-police",
+  "version": "1.3.0",
+  "scripts": {
+    "test": "node --test test.mjs"
+  },
+  "pi": {
+    "extensions": ["./extensions"],
+    "skills": ["./skills"]
+  }
+}

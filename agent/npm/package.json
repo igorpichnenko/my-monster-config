@@ -1,0 +1,9 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "loop-police": "file:loop-police",
+    "pi-minimal-web": "file:pi-minimal-web",
+    "pi-sub": "file:pi-sub"
+  }
+}
