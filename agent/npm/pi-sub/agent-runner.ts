@@ -1,6 +1,7 @@
 /**
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  * Phase 4B: Injects relevant facts from session memory into subagent prompts.
+ * Phase 6: Generates detailedSummary and meta for all agents (main + subagents).
  */
 
 import { homedir } from "node:os";
@@ -27,6 +28,9 @@ import type { SubagentType, ThinkingLevel } from "./types.js";
 import { MemoryDatabase } from "./memory/database.js";
 import { getSessionMemory } from "./memory/session-memory.js";
 
+// ---- ФАЗА 6: Импорт утилиты для генерации compaction summary ----
+import { generateCompactionDetailedSummary, type CompactionMeta } from "./context-tools/utils/compaction-summary.js";
+
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
   GET_RESULT: "get_subagent_result",
@@ -35,10 +39,15 @@ export const SUBAGENT_TOOL_NAMES = {
 
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
+// ============================================================================
+// ФАЗА 6: Обновлённый интерфейс CompactionInfo
+// ============================================================================
 export interface CompactionInfo {
   reason: "manual" | "threshold" | "overflow";
   tokensBefore: number;
   summary?: string;
+  detailedSummary?: string;  // ← НОВОЕ: структурированный дамп
+  meta?: CompactionMeta;     // ← НОВОЕ: ключевые слова
 }
 
 export function extensionCanonicalName(extPath: string): string {
@@ -162,11 +171,7 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   onTurnEnd?: (turnCount: number) => void;
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-  onCompaction?: (info: { 
-    reason: "manual" | "threshold" | "overflow"; 
-    tokensBefore: number;
-    summary?: string;  // ← ДОБАВЛЕНО
-  }) => void;
+  onCompaction?: (info: CompactionInfo) => void;  // ← Обновлено: теперь CompactionInfo
 }
 
 export interface RunResult {
@@ -244,13 +249,10 @@ export async function runAgent(
     const memoryDb = MemoryDatabase.getInstance();
     const sessionMemory = getSessionMemory(memoryDb);
     
-    // Отладочное логирование
     console.log(`[pi-sub] 🔍 Searching facts for prompt: "${prompt.slice(0, 100)}..."`);
     
-    // Ищем релевантные факты для промпта (максимум 5)
     const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
     
-    // Отладочное логирование результатов
     console.log(`[pi-sub] 🔍 Found ${relevantFacts.length} relevant facts`);
     for (const fact of relevantFacts) {
       console.log(`[pi-sub] 🔍   - [${fact.fact_type}] ${fact.content.slice(0, 50)}`);
@@ -511,13 +513,43 @@ export async function runAgent(
         cacheWrite: u.cacheWrite ?? 0,
       });
     }
+    
+    // ==========================================================================
+    // ФАЗА 6: Генерация detailedSummary и meta для ВСЕХ агентов
+    // ==========================================================================
     if (event.type === "compaction_end" && !event.aborted && event.result) {
-  options.onCompaction?.({ 
-    reason: event.reason, 
-    tokensBefore: event.result.tokensBefore,
-    summary: event.result.summary,  // ← ДОБАВЛЕНО
-  });
-}
+      let detailedSummary = "";
+      let meta: CompactionMeta | undefined;
+      
+      const preparation = (event.result as any).preparation;
+      if (preparation?.messagesToSummarize?.length > 0) {
+        try {
+          const result = generateCompactionDetailedSummary(
+            preparation.messagesToSummarize,
+            preparation.tokensBefore
+          );
+          detailedSummary = result.detailed;
+          meta = result.meta;
+          
+          console.log(
+            `[pi-sub] 📦 Generated compaction summary for agent ${options.agentId || type}: ` +
+            `${preparation.messagesToSummarize.length} msgs, ` +
+            `${detailedSummary.length} chars, ` +
+            `${meta.keyFiles.length} files, ${meta.keyDecisions.length} decisions, ${meta.keyLessons.length} lessons`
+          );
+        } catch (err) {
+          console.error(`[pi-sub] ❌ Failed to generate compaction summary for agent ${options.agentId || type}:`, err);
+        }
+      }
+      
+      options.onCompaction?.({ 
+        reason: event.reason, 
+        tokensBefore: event.result.tokensBefore,
+        summary: event.result.summary,
+        detailedSummary,
+        meta,
+      });
+    }
   });
 
   const collector = collectResponseText(session);
@@ -549,7 +581,7 @@ export async function resumeAgent(
   options: {
     onToolActivity?: (activity: ToolActivity) => void;
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-    onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+    onCompaction?: (info: CompactionInfo) => void;  // ← Обновлено: теперь CompactionInfo
     signal?: AbortSignal;
   } = {},
 ): Promise<string> {
@@ -568,11 +600,40 @@ export async function resumeAgent(
             cacheWrite: u.cacheWrite ?? 0,
           });
         }
+        
+        // ==========================================================================
+        // ФАЗА 6: Генерация detailedSummary и meta для resumed agents
+        // ==========================================================================
         if (event.type === "compaction_end" && !event.aborted && event.result) {
+          let detailedSummary = "";
+          let meta: CompactionMeta | undefined;
+          
+          const preparation = (event.result as any).preparation;
+          if (preparation?.messagesToSummarize?.length > 0) {
+            try {
+              const result = generateCompactionDetailedSummary(
+                preparation.messagesToSummarize,
+                preparation.tokensBefore
+              );
+              detailedSummary = result.detailed;
+              meta = result.meta;
+              
+              console.log(
+                `[pi-sub] 📦 Generated compaction summary for resumed agent: ` +
+                `${preparation.messagesToSummarize.length} msgs, ` +
+                `${detailedSummary.length} chars`
+              );
+            } catch (err) {
+              console.error(`[pi-sub] ❌ Failed to generate compaction summary for resumed agent:`, err);
+            }
+          }
+          
           options.onCompaction?.({ 
             reason: event.reason, 
             tokensBefore: event.result.tokensBefore,
             summary: event.result.summary,
+            detailedSummary,
+            meta,
           });
         }
       })

@@ -7,6 +7,7 @@
  * Phase 4B: Inject relevant facts into subagent prompts
  * Phase 4C: Custom system prompt with memory policy
  * Phase 5: Normalized compaction keywords for better search
+ * Phase 6: Compaction data for all agents (main + subagents)
  */
 
 import { dirname, join } from "node:path";
@@ -95,163 +96,6 @@ Current working directory: ${process.cwd()}`;
 }
 
 // ============================================================================
-// Генерация структурированного дампа компакции для ctx_search
-// ============================================================================
-
-/**
- * Метаданные компакции для сохранения в нормализованную таблицу.
- */
-export interface CompactionMeta {
-  keyFiles: string[];
-  keyDecisions: string[];
-  keyLessons: string[];
-}
-
-/**
- * Генерирует структурированный дамп из messagesToSummarize.
- * Включает: ключевые решения, файлы, код, контекст — всё индексируется FTS5.
- * Также возвращает метаданные для сохранения в compaction_keywords.
- */
-function generateCompactionDetailedSummary(
-  messagesToSummarize: any[],
-  tokensBefore: number
-): { detailed: string; meta: CompactionMeta } {
-  const sections: string[] = [];
-  const meta: CompactionMeta = {
-    keyFiles: [],
-    keyDecisions: [],
-    keyLessons: [],
-  };
-
-  // 1. Сводка
-  sections.push(`## Context Summary`);
-  const byRole = messagesToSummarize.reduce((acc, m) => {
-    acc[m.role] = (acc[m.role] || 0) + 1;
-    return acc;
-  }, {} as Record<string, number>);
-  sections.push(
-    `- Messages: ${messagesToSummarize.length} (${Object.entries(byRole).map(([r, c]) => `${c}x ${r}`).join(", ")})`
-  );
-  sections.push(`- Tokens before compaction: ${tokensBefore}`);
-
-  // 2. Извлечённые решения и выводы
-  const decisions: string[] = [];
-  const lessons: string[] = [];
-  
-  messagesToSummarize.forEach((m) => {
-    const text = Array.isArray(m.content)
-      ? m.content.map((c: any) => c.text || "").join(" ")
-      : (typeof m.content === "string" ? m.content : "");
-    
-    const lower = text.toLowerCase();
-    
-    if (lower.includes("decision") || lower.includes("решили") || lower.includes("решил")) {
-      // Извлекаем короткую фразу (до 50 символов)
-      const decision = text.slice(0, 50).trim();
-      if (decision.length > 10) {
-        decisions.push(decision);
-        meta.keyDecisions.push(decision);
-      }
-    }
-    
-    if (lower.includes("lesson") || lower.includes("важно") || lower.includes("проблема")) {
-      const lesson = text.slice(0, 50).trim();
-      if (lesson.length > 10) {
-        lessons.push(lesson);
-        meta.keyLessons.push(lesson);
-      }
-    }
-  });
-
-  if (decisions.length > 0) {
-    sections.push(`\n## Key Decisions`);
-    decisions.slice(0, 5).forEach((d, i) => {
-      sections.push(`${i + 1}. ${d.trim()}`);
-    });
-  }
-
-  if (lessons.length > 0) {
-    sections.push(`\n## Lessons Learned`);
-    lessons.slice(0, 3).forEach((l, i) => {
-      sections.push(`${i + 1}. ${l.trim()}`);
-    });
-  }
-
-  // 3. Файлы, которые читались/писались
-  const files = new Set<string>();
-  messagesToSummarize.forEach((m) => {
-    const text = Array.isArray(m.content)
-      ? m.content.map((c: any) => c.text || "").join(" ")
-      : (typeof m.content === "string" ? m.content : "");
-    
-    // Ищем пути файлов
-    const fileMatches = text.match(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?([^\s"']+\.ts|tsx|js|json|md|yaml|yml)/gi);
-    if (fileMatches) {
-      fileMatches.forEach((match) => {
-        const file = match.replace(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?/, "").trim();
-        if (file) {
-          files.add(file);
-          meta.keyFiles.push(file);
-        }
-      });
-    }
-    
-    // Ищем import/require
-    const importMatches = text.match(/from\s+["']([^"']+)["']/g);
-    if (importMatches) {
-      importMatches.forEach((match) => {
-        const path = match.replace(/from\s+["']?/, "").replace(/["']/g, "");
-        if (path.startsWith("./") || path.startsWith("../")) {
-          files.add(path);
-          meta.keyFiles.push(path);
-        }
-      });
-    }
-  });
-
-  if (files.size > 0) {
-    sections.push(`\n## Affected Files`);
-    sections.push([...files].slice(0, 20).map((f) => `- \`${f}\``).join("\n"));
-  }
-
-  // 4. Фрагменты кода
-  const codeSnippets: string[] = [];
-  messagesToSummarize.forEach((m) => {
-    const text = Array.isArray(m.content)
-      ? m.content.map((c: any) => c.text || "").join(" ")
-      : (typeof m.content === "string" ? m.content : "");
-    
-    // Ищем блоки кода
-    const codeBlocks = text.match(/```[\s\S]*?```/g);
-    if (codeBlocks) {
-      codeBlocks.forEach((block) => {
-        const preview = block.slice(0, 300);
-        codeSnippets.push(preview);
-      });
-    }
-    // Ищем определения функций/классов
-    const defs = text.match(/(?:function|class|export|interface|type)\s+\w+/g);
-    if (defs) {
-      defs.forEach((d) => {
-        if (!codeSnippets.includes(d) && d.length > 10) codeSnippets.push(d);
-      });
-    }
-  });
-
-  if (codeSnippets.length > 0) {
-    sections.push(`\n## Code Context`);
-    codeSnippets.slice(0, 3).forEach((s, i) => {
-      sections.push(`Snippet ${i + 1}:\n\`\`\`\n${s}\n\`\`\``);
-    });
-  }
-
-  return { 
-    detailed: sections.join("\n"), 
-    meta 
-  };
-}
-
-// ============================================================================
 // Главная функция расширения
 // ============================================================================
 
@@ -311,11 +155,6 @@ export default function (pi: ExtensionAPI) {
   // ==========================================================================
   // Agent Manager
   // ==========================================================================
-  
-  // Храним detailed_summary и meta из session_before_compact для использования в compaction_end
-  let pendingDetailedSummary: string | null = null;
-  let pendingMeta: CompactionMeta | null = null;
-  
   const agentActivity = new Map<string, AgentActivity>();
   const manager = new AgentManager(
     (record) => {
@@ -407,30 +246,35 @@ export default function (pi: ExtensionAPI) {
         description: record.description,
       });
     },
+    
+    // ==========================================================================
+    // ФАЗА 6: onCompact callback — работает для ВСЕХ агентов (main + subagents)
+    // ==========================================================================
     (record, info) => {
       // Сохраняем summary компакции в БД (LLM-generated + detailed_summary)
+      // Теперь работает для ВСЕХ агентов благодаря генерации в agent-runner.ts
       if (memoryDb && info.summary && info.tokensBefore > 0) {
         try {
-          const isMainAgent = !record.type || record.type === "main";
-          
-          // Сохраняем summary
+          // Сохраняем summary + detailed_summary
           const compactionId = memoryDb.saveCompactionSummary({
             sessionId: sessionMemory?.getSessionId() || "unknown",
             reason: info.reason,
             tokensBefore: info.tokensBefore,
             summary: info.summary,
-            detailedSummary: isMainAgent ? (pendingDetailedSummary || "") : "",
+            detailedSummary: info.detailedSummary || "",  // ← работает для всех
           });
           
           console.log(
-            `[pi-sub] 💾 Saved compaction summary (ID: ${compactionId}, ${info.tokensBefore} tokens, ` +
+            `[pi-sub] 💾 Saved compaction summary (ID: ${compactionId}, ` +
+            `agent: ${record.type || "main"}, ` +
+            `${info.tokensBefore} tokens, ` +
             `${info.summary.length} chars summary, ` +
-            `${isMainAgent ? (pendingDetailedSummary?.length || 0) : 0} chars detailed)` +
-            `${isMainAgent ? '' : ' [subagent — no detailed]'}`,
+            `${(info.detailedSummary?.length || 0)} chars detailed)`,
           );
           
           // Сохраняем ключевые слова в нормализованную таблицу
-          if (isMainAgent && pendingMeta) {
+          // Теперь работает для ВСЕХ агентов благодаря meta из agent-runner.ts
+          if (info.meta) {
             const keywords: Array<{
               compactionId: number;
               keyword: string;
@@ -438,7 +282,7 @@ export default function (pi: ExtensionAPI) {
             }> = [];
             
             // Добавляем файлы
-            for (const file of pendingMeta.keyFiles.slice(0, 10)) {
+            for (const file of info.meta.keyFiles.slice(0, 10)) {
               keywords.push({
                 compactionId,
                 keyword: file,
@@ -447,7 +291,7 @@ export default function (pi: ExtensionAPI) {
             }
             
             // Добавляем решения
-            for (const decision of pendingMeta.keyDecisions.slice(0, 5)) {
+            for (const decision of info.meta.keyDecisions.slice(0, 5)) {
               keywords.push({
                 compactionId,
                 keyword: decision,
@@ -456,7 +300,7 @@ export default function (pi: ExtensionAPI) {
             }
             
             // Добавляем уроки
-            for (const lesson of pendingMeta.keyLessons.slice(0, 5)) {
+            for (const lesson of info.meta.keyLessons.slice(0, 5)) {
               keywords.push({
                 compactionId,
                 keyword: lesson,
@@ -468,13 +312,10 @@ export default function (pi: ExtensionAPI) {
               const saved = memoryDb.saveCompactionKeywords(keywords);
               console.log(
                 `[pi-sub] 🔑 Saved ${saved} keywords for compaction ${compactionId} ` +
-                `(${pendingMeta.keyFiles.length} files, ${pendingMeta.keyDecisions.length} decisions, ${pendingMeta.keyLessons.length} lessons)`
+                `(${info.meta.keyFiles.length} files, ${info.meta.keyDecisions.length} decisions, ${info.meta.keyLessons.length} lessons)`
               );
             }
           }
-          
-          pendingDetailedSummary = null;
-          pendingMeta = null;
         } catch (err) {
           console.error(`[pi-sub] Failed to save compaction summary:`, err);
         }
@@ -605,7 +446,6 @@ export default function (pi: ExtensionAPI) {
 
   // ==========================================================================
   // ФАЗА 4A: Автоматическое извлечение фактов перед сжатием контекста
-  //         + генерация detailed_summary и метаданных для compaction_keywords
   // ==========================================================================
   pi.on("session_before_compact", async (event: any, ctx) => {
     if (!sessionMemory) return;
@@ -632,32 +472,6 @@ export default function (pi: ExtensionAPI) {
       }
     } catch (err) {
       console.error(`[pi-sub] ❌ Failed to extract facts:`, err);
-    }
-
-    // ==========================================================================
-    // Генерируем detailed_summary компакции и метаданные для ctx_search
-    // ==========================================================================
-    try {
-      const preparation = event?.preparation;
-
-      if (!preparation) return;
-
-      // messagesToSummarize — массив сообщений, которые будут сжаты
-      const messagesToSummarize = preparation.messagesToSummarize || [];
-      if (messagesToSummarize.length === 0) return;
-
-      // Генерируем структурированный дамп и метаданные
-      const result = generateCompactionDetailedSummary(messagesToSummarize, preparation.tokensBefore);
-      pendingDetailedSummary = result.detailed;
-      pendingMeta = result.meta;
-
-      console.log(
-        `[pi-sub] 📦 Generated compaction detailed_summary: ${messagesToSummarize.length} msgs, ` +
-        `${pendingDetailedSummary.length} chars, ` +
-        `${pendingMeta.keyFiles.length} files, ${pendingMeta.keyDecisions.length} decisions, ${pendingMeta.keyLessons.length} lessons`,
-      );
-    } catch (err) {
-      console.error(`[pi-sub] ❌ Failed to generate compaction detailed_summary:`, err);
     }
   });
 
