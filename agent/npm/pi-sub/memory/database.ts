@@ -5,6 +5,7 @@
  * - tool-interceptor (перехват вывода инструментов)
  * - result-compressor (кэш сжатых результатов)
  * - session-memory (долговременная память между сессиями)
+ * - compaction-keywords (нормализованные ключевые слова компакций)
  *
  * Архитектура:
  * - Singleton (один экземпляр на проект)
@@ -19,7 +20,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /** Путь к БД относительно корня проекта. */
 const DB_RELATIVE_PATH = ".pi/memory/unified.db";
@@ -54,7 +55,7 @@ export interface SessionFact {
 }
 
 export interface CompressedResult {
-  id: number;  // ← ДОБАВЛЕНО: surrogate key для FTS5
+  id: number;
   original_hash: string;
   compressed: string;
   timestamp: number;
@@ -67,6 +68,14 @@ export interface CompactionSummary {
   tokens_before: number;
   summary: string;
   detailed_summary: string;
+  timestamp: number;
+}
+
+export interface CompactionKeyword {
+  id: number;
+  compaction_id: number;
+  keyword: string;
+  category: "file" | "decision" | "lesson";
   timestamp: number;
 }
 
@@ -315,6 +324,49 @@ export class MemoryDatabase {
           VALUES (new.id, new.reason, new.summary, new.detailed_summary);
         END;
 
+        -- НОРМАЛИЗОВАННЫЕ КЛЮЧЕВЫЕ СЛОВА КОМПАКЦИЙ
+        CREATE TABLE IF NOT EXISTS compaction_keywords (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          compaction_id INTEGER NOT NULL,
+          keyword TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('file', 'decision', 'lesson')),
+          timestamp INTEGER NOT NULL,
+          FOREIGN KEY (compaction_id) REFERENCES compaction_summaries(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_compaction 
+          ON compaction_keywords(compaction_id);
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_category 
+          ON compaction_keywords(category);
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_timestamp 
+          ON compaction_keywords(timestamp DESC);
+
+        -- FTS5 индекс для быстрого поиска по ключевым словам
+        CREATE VIRTUAL TABLE IF NOT EXISTS compaction_keywords_fts USING fts5(
+          keyword,
+          content='compaction_keywords',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        -- Триггеры для синхронизации FTS5
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_ai AFTER INSERT ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(rowid, keyword)
+          VALUES (new.id, new.keyword);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_ad AFTER DELETE ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
+          VALUES ('delete', old.id, old.keyword);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_au AFTER UPDATE ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
+          VALUES ('delete', old.id, old.keyword);
+          INSERT INTO compaction_keywords_fts(rowid, keyword)
+          VALUES (new.id, new.keyword);
+        END;
+
         INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION});
       `);
     } else if (currentVersion.version < SCHEMA_VERSION) {
@@ -356,6 +408,16 @@ export class MemoryDatabase {
     }
 
     if (fromVersion < 4) {
+      const columns = this.db.prepare("PRAGMA table_info(compaction_summaries)").all() as Array<{ name: string }>;
+      const hasDetailedSummary = columns.some(c => c.name === "detailed_summary");
+      
+      if (!hasDetailedSummary) {
+        console.log(`[pi-sub] Adding missing detailed_summary column (migration v4)`);
+        this.db.exec(`
+          ALTER TABLE compaction_summaries ADD COLUMN detailed_summary TEXT NOT NULL DEFAULT ''
+        `);
+      }
+      
       this.db.exec(`
         DROP TABLE IF EXISTS compaction_summaries_fts
       `);
@@ -387,11 +449,19 @@ export class MemoryDatabase {
     }
 
     if (fromVersion < 5) {
-      // v4 → v5: Добавляем FTS5 для compressed_results
       console.log(`[pi-sub] Migrating to v5: Adding FTS5 for compressed_results`);
       
+      const columns = this.db.prepare("PRAGMA table_info(compaction_summaries)").all() as Array<{ name: string }>;
+      const hasDetailedSummary = columns.some(c => c.name === "detailed_summary");
+      
+      if (!hasDetailedSummary) {
+        console.log(`[pi-sub] Adding missing detailed_summary column (migration v5)`);
+        this.db.exec(`
+          ALTER TABLE compaction_summaries ADD COLUMN detailed_summary TEXT NOT NULL DEFAULT ''
+        `);
+      }
+      
       this.db.exec(`
-        -- Создаём новую таблицу с id
         CREATE TABLE IF NOT EXISTS compressed_results_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           original_hash TEXT NOT NULL UNIQUE,
@@ -399,21 +469,16 @@ export class MemoryDatabase {
           timestamp INTEGER NOT NULL
         );
 
-        -- Копируем данные из старой таблицы
         INSERT INTO compressed_results_new (original_hash, compressed, timestamp)
         SELECT original_hash, compressed, timestamp FROM compressed_results;
 
-        -- Удаляем старую таблицу
         DROP TABLE compressed_results;
 
-        -- Переименовываем новую таблицу
         ALTER TABLE compressed_results_new RENAME TO compressed_results;
 
-        -- Создаём индекс
         CREATE INDEX IF NOT EXISTS idx_compressed_results_timestamp 
           ON compressed_results(timestamp DESC);
 
-        -- Создаём FTS5 индекс
         CREATE VIRTUAL TABLE IF NOT EXISTS compressed_results_fts USING fts5(
           original_hash, compressed,
           content='compressed_results',
@@ -421,7 +486,6 @@ export class MemoryDatabase {
           tokenize='unicode61'
         );
 
-        -- Создаём триггеры
         CREATE TRIGGER IF NOT EXISTS compressed_results_ai AFTER INSERT ON compressed_results BEGIN
           INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
           VALUES (new.id, new.original_hash, new.compressed);
@@ -437,6 +501,52 @@ export class MemoryDatabase {
           VALUES ('delete', old.id, old.original_hash, old.compressed);
           INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
           VALUES (new.id, new.original_hash, new.compressed);
+        END;
+      `);
+    }
+
+    if (fromVersion < 6) {
+      console.log(`[pi-sub] Migrating to v6: Adding compaction_keywords table`);
+      
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS compaction_keywords (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          compaction_id INTEGER NOT NULL,
+          keyword TEXT NOT NULL,
+          category TEXT NOT NULL CHECK(category IN ('file', 'decision', 'lesson')),
+          timestamp INTEGER NOT NULL,
+          FOREIGN KEY (compaction_id) REFERENCES compaction_summaries(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_compaction 
+          ON compaction_keywords(compaction_id);
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_category 
+          ON compaction_keywords(category);
+        CREATE INDEX IF NOT EXISTS idx_compaction_keywords_timestamp 
+          ON compaction_keywords(timestamp DESC);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS compaction_keywords_fts USING fts5(
+          keyword,
+          content='compaction_keywords',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_ai AFTER INSERT ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(rowid, keyword)
+          VALUES (new.id, new.keyword);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_ad AFTER DELETE ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
+          VALUES ('delete', old.id, old.keyword);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_keywords_au AFTER UPDATE ON compaction_keywords BEGIN
+          INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
+          VALUES ('delete', old.id, old.keyword);
+          INSERT INTO compaction_keywords_fts(rowid, keyword)
+          VALUES (new.id, new.keyword);
         END;
       `);
     }
@@ -630,13 +740,11 @@ export class MemoryDatabase {
   }
 
   saveCompressedResult(originalHash: string, compressed: string): number {
-    // Проверяем существует ли уже
     const existing = this.db.prepare(
       "SELECT id FROM compressed_results WHERE original_hash = ?"
     ).get(originalHash) as { id: number } | undefined;
     
     if (existing) {
-      // Обновляем существующую запись
       this.db.prepare(`
         UPDATE compressed_results 
         SET compressed = ?, timestamp = ?
@@ -645,7 +753,6 @@ export class MemoryDatabase {
       return existing.id;
     }
     
-    // Создаём новую запись
     const stmt = this.db.prepare(`
       INSERT INTO compressed_results (original_hash, compressed, timestamp)
       VALUES (?, ?, ?)
@@ -750,6 +857,167 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
+  // Compaction Keywords (нормализованные ключевые слова)
+  // =========================================================================
+
+  /**
+   * Сохранить ключевое слово компакции.
+   * Возвращает ID сохранённой записи.
+   */
+  saveCompactionKeyword(data: {
+    compactionId: number;
+    keyword: string;
+    category: "file" | "decision" | "lesson";
+  }): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO compaction_keywords (compaction_id, keyword, category, timestamp)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      data.compactionId,
+      data.keyword,
+      data.category,
+      Date.now()
+    );
+
+    return Number(result.lastInsertRowid);
+  }
+
+  /**
+   * Сохранить несколько ключевых слов компакции за одну транзакцию.
+   * Это намного быстрее, чем сохранять по одному.
+   */
+  saveCompactionKeywords(keywords: Array<{
+    compactionId: number;
+    keyword: string;
+    category: "file" | "decision" | "lesson";
+  }>): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO compaction_keywords (compaction_id, keyword, category, timestamp)
+      VALUES (?, ?, ?, ?)
+    `);
+
+    const insertMany = this.db.transaction((items: typeof keywords) => {
+      for (const item of items) {
+        stmt.run(item.compactionId, item.keyword, item.category, Date.now());
+      }
+      return items.length;
+    });
+
+    return insertMany(keywords);
+  }
+
+  /**
+   * Получить все ключевые слова для конкретной компакции.
+   */
+  getCompactionKeywords(compactionId: number): CompactionKeyword[] {
+    return this.db.prepare(`
+      SELECT * FROM compaction_keywords
+      WHERE compaction_id = ?
+      ORDER BY category, keyword
+    `).all(compactionId) as CompactionKeyword[];
+  }
+
+  /**
+   * Поиск по ключевым словам через FTS5.
+   * Возвращает ключевые слова с информацией о компакции.
+   */
+  searchKeywords(query: string, limit: number = 10): Array<CompactionKeyword & {
+    compaction_reason: string;
+    compaction_tokens_before: number;
+    compaction_timestamp: number;
+  }> {
+    return this.db.prepare(`
+      SELECT 
+        ck.*,
+        cs.reason as compaction_reason,
+        cs.tokens_before as compaction_tokens_before,
+        cs.timestamp as compaction_timestamp
+      FROM compaction_keywords ck
+      JOIN compaction_keywords_fts f ON ck.id = f.rowid
+      JOIN compaction_summaries cs ON ck.compaction_id = cs.id
+      WHERE compaction_keywords_fts MATCH ?
+      ORDER BY ck.timestamp DESC
+      LIMIT ?
+    `).all(query, limit) as any[];
+  }
+
+  /**
+   * Поиск по ключевым словам с фильтрацией по категории.
+   */
+  searchKeywordsByCategory(
+    query: string,
+    category: "file" | "decision" | "lesson",
+    limit: number = 10
+  ): CompactionKeyword[] {
+    return this.db.prepare(`
+      SELECT ck.*
+      FROM compaction_keywords ck
+      JOIN compaction_keywords_fts f ON ck.id = f.rowid
+      WHERE compaction_keywords_fts MATCH ?
+        AND ck.category = ?
+      ORDER BY ck.timestamp DESC
+      LIMIT ?
+    `).all(query, category, limit) as CompactionKeyword[];
+  }
+
+  /**
+   * Получить последние N ключевых слов.
+   */
+  getRecentKeywords(limit: number = 20): CompactionKeyword[] {
+    return this.db.prepare(`
+      SELECT * FROM compaction_keywords
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(limit) as CompactionKeyword[];
+  }
+
+  /**
+   * Удалить старые ключевые слова (старше N дней).
+   */
+  purgeOldKeywords(daysOld: number = 30): number {
+    const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+    const result = this.db.prepare(
+      "DELETE FROM compaction_keywords WHERE timestamp < ?"
+    ).run(cutoff);
+    return result.changes;
+  }
+
+  /**
+   * Получить статистику по ключевым словам.
+   */
+  getKeywordsStats(): {
+    total: number;
+    byCategory: { file: number; decision: number; lesson: number };
+    uniqueKeywords: number;
+  } {
+    const total = (this.db.prepare(
+      "SELECT COUNT(*) as count FROM compaction_keywords"
+    ).get() as { count: number }).count;
+
+    const byCategory = this.db.prepare(`
+      SELECT category, COUNT(*) as count
+      FROM compaction_keywords
+      GROUP BY category
+    `).all() as Array<{ category: string; count: number }>;
+
+    const uniqueKeywords = (this.db.prepare(
+      "SELECT COUNT(DISTINCT keyword) as count FROM compaction_keywords"
+    ).get() as { count: number }).count;
+
+    return {
+      total,
+      byCategory: {
+        file: byCategory.find(c => c.category === "file")?.count || 0,
+        decision: byCategory.find(c => c.category === "decision")?.count || 0,
+        lesson: byCategory.find(c => c.category === "lesson")?.count || 0,
+      },
+      uniqueKeywords,
+    };
+  }
+
+  // =========================================================================
   // Статистика
   // =========================================================================
 
@@ -759,6 +1027,7 @@ export class MemoryDatabase {
     sessionFacts: number;
     compressedResults: number;
     compactionSummaries: number;
+    compactionKeywords: number;
     dbSizeMb: number;
   } {
     const toolOutputs = (this.db.prepare(
@@ -781,6 +1050,10 @@ export class MemoryDatabase {
       "SELECT COUNT(*) as count FROM compaction_summaries"
     ).get() as { count: number }).count;
 
+    const compactionKeywords = (this.db.prepare(
+      "SELECT COUNT(*) as count FROM compaction_keywords"
+    ).get() as { count: number }).count;
+
     const pageInfo = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
     const pageSize = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
     const dbSizeMb = (pageInfo.page_count * pageSize.page_size) / (1024 * 1024);
@@ -790,7 +1063,8 @@ export class MemoryDatabase {
       subagentResults, 
       sessionFacts, 
       compressedResults,
-      compactionSummaries, 
+      compactionSummaries,
+      compactionKeywords,
       dbSizeMb 
     };
   }

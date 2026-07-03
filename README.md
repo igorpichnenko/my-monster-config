@@ -89,7 +89,7 @@ ls({ path: ".", options: "-la" })
 
 ```typescript
 ctx_search({ query: "registerCommand", limit: 10 })
-ctx_search({ query: "id:42" })  // полный вывод по ID
+ctx_search({ query: "id:42" })  # полный вывод по ID
 ```
 
 - Полнотекстовый поиск (FTS5) по всем сохранённым выводам
@@ -138,7 +138,7 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | `/agent-bg` | Запустить субагент в фоне | `[--no-inject\|--silent] <prompt>` |
 | `/agent-steer` | Отправить сообщение работающему субагенту | `<id> <message>` |
 | `/agent-result` | Получить результат завершённого субагента | `<id>` |
-| `/agent-inject` | Инжектить результат в контекст родителя | `<id>` |
+| `/agent-inject` | Инжектировать результат в контекст родителя | `<id>` |
 | `/agent-resume` | Возобновить субагент с новым промптом | `<id> <prompt>` |
 | `/agent-view` | Мониторинг вывода в реальном времени (5 мин) | `<id>` |
 | `/agent-status` | Статус, tool uses, turns, duration | `<id>` |
@@ -156,11 +156,12 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | Команда | Описание | Параметры |
 |---------|----------|-----------|
 | `/memory-stats` | Статистика БД | - |
-| `/memory-search` | Поиск по фактам из сессий | `<query>` |
+| `/memory-search` | Поиск по всем данным | `<query>` |
 | `/memory-add` | Добавить факт вручную | `<type> <content>` |
 | `/memory-purge` | Очистить старые данные | `[tools=N] [facts=N]` |
 | `/memory-test` | Тестовые операции с БД | - |
 | `/memory-summaries` | Показать summaries компакции | `[limit]` |
+| `/memory-keywords` | Показать ключевые слова компакций | `[query]` |
 
 **Типы фактов:**
 
@@ -176,6 +177,8 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 /memory-add decision Используем PostgreSQL
 /memory-search TypeScript
 /memory-purge tools=7 facts=30
+/memory-keywords WAL              # Поиск по ключевым словам
+/memory-keywords                  # Показать последние ключевые слова
 ```
 
 ### Другие команды
@@ -233,8 +236,8 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | `session_before_switch` | Очистка завершённых агентов |
 | `session_shutdown` | Abort всех, dispose |
 | `tool_execution_start` | Обновление UI виджета |
-| `tool_result` | Обрезка вывода до 50KB |
-| `session_before_compact` | Извлечение фактов + генерация detailed_summary |
+| `tool_result` | Обрезка вывода до 5KB |
+| `session_before_compact` | Извлечение фактов + генерация detailed_summary + метаданных |
 | `before_agent_start` | Кастомный system prompt с memory policy |
 
 ### loop-police
@@ -303,10 +306,67 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 │   ├── id, session_id, reason, tokens_before, summary, detailed_summary, timestamp
 │   └── FTS5 index (compaction_summaries_fts)
 │
-└── compressed_results
-    ├── id, original_hash, compressed, timestamp
-    └── FTS5 index (compressed_results_fts)
+├── compressed_results
+│   ├── id, original_hash, compressed, timestamp
+│   └── FTS5 index (compressed_results_fts)
+│
+└── compaction_keywords (нормализованные ключевые слова)
+    ├── id, compaction_id, keyword, category, timestamp
+    ├── category: file | decision | lesson
+    └── FTS5 index (compaction_keywords_fts)
 ```
+
+### Как модель получает данные в новой сессии
+
+Есть **3 механизма** доступа к памяти:
+
+#### 1. Автоматическая инъекция фактов (пассивный)
+
+При запуске **субагента** в system prompt инжектируются релевантные факты из `session_facts`:
+
+```
+# Session Memory
+Relevant context from previous sessions:
+- 🎯 [decision] Используем PostgreSQL для хранения данных
+- 💡 [lesson] Не использовать any в TypeScript
+- ⭐ [preference] Предпочитаю функциональный стиль
+```
+
+**Ограничение:** Только `session_facts`, максимум 5 фактов.
+
+#### 2. Memory Policy в system prompt (подсказка)
+
+При старте **каждого агента** в system prompt добавляется подсказка:
+
+```
+## Context Preservation
+Large outputs (>5000 chars) from bash, read, grep, find, ls are auto-saved to SQLite DB.
+Use ctx_search to retrieve full saved output or search past results.
+Memory contains: decisions, lessons, preferences, architecture notes, API details.
+```
+
+#### 3. Прямой поиск через `ctx_search` (активный)
+
+Модель **сама решает** когда искать информацию:
+
+```typescript
+// Поиск по ключевым словам
+ctx_search({ query: "PostgreSQL" })
+
+// Поиск по ID (полный вывод)
+ctx_search({ query: "id:42" })
+
+// Поиск по ключевым словам компакций
+ctx_search({ query: "WAL mode" })
+```
+
+**Что ищет:** По **ВСЕМ** таблицам с FTS5:
+- `tool_outputs` — прошлые выводы bash/read/grep/find/ls
+- `subagent_results` — результаты прошлых субагентов
+- `session_facts` — извлечённые факты
+- `compaction_summaries` — summaries компакций
+- `compressed_results` — сжатые результаты
+- `compaction_keywords` — нормализованные ключевые слова
 
 ### Поиск корневого `.pi`
 
@@ -343,6 +403,34 @@ api: "endpoint", "route", "auth", "API"
 4. Проверка дубликатов (hash)
 5. Сохранение в `session_facts`
 
+### Нормализованные ключевые слова компакций
+
+При компакции контекста автоматически извлекаются ключевые слова:
+
+**Категории:**
+- `file` — файлы, которые читались/писались (например, `database.ts`, `ctx-search.ts`)
+- `decision` — принятые решения (например, `use WAL mode`, `FTS5 search`)
+- `lesson` — извлечённые уроки (например, `check null before access`)
+
+**Преимущества:**
+- FTS5 индексирует **каждое ключевое слово отдельно**
+- Можно искать по категории: `category:decision AND WAL`
+- Нет дублирования — только ссылки на `compaction_summaries`
+- Масштабируемо — можно добавить миллионы ключевых слов
+
+**Пример поиска:**
+
+```bash
+# Найти все компакции, где работали с database.ts
+ctx_search "database.ts"
+
+# Найти все решения про WAL
+/memory-keywords WAL
+
+# Получить полный detailed_summary
+ctx_search "id:42"
+```
+
 ### Инжекция в промпт
 
 При запуске субагента:
@@ -350,7 +438,7 @@ api: "endpoint", "route", "auth", "API"
 ```typescript
 const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
 const memoryBlock = `# Session Memory\n${relevantFacts.join("\n")}`;
-// Инжектится в system prompt субагента
+// Инжектируется в system prompt субагента
 ```
 
 ---
@@ -416,7 +504,7 @@ AgentRunner.runAgent()
     ▼
 onComplete callback
     ├── Сохраняет результат в subagent_results
-    ├── Если !noInject → инжектит в родителя
+    ├── Если !noInject → инжектирует в родителя
     └── Обновляет UI виджет
 ```
 
@@ -457,17 +545,23 @@ ls -lh .pi/memory/unified.db
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM tool_outputs;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM subagent_results;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM session_facts;"
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM compaction_keywords;"
 
 # Последние записи
 sqlite3 .pi/memory/unified.db "SELECT id, tool_name, size FROM tool_outputs ORDER BY timestamp DESC LIMIT 5;"
+
+# Статистика ключевых слов
+sqlite3 .pi/memory/unified.db "SELECT category, COUNT(*) FROM compaction_keywords GROUP BY category;"
 ```
 
 ### Логи
 
 ```
-[pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Size: 12.5 MB
+[pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Size: 12.5 MB
 [pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
-[pi-sub] 🗜️ Agent abc123: compressed (5000 → 950 chars)
+[pi-sub] 📦 Generated compaction detailed_summary: 47 msgs, 5234 chars, 8 files, 3 decisions, 2 lessons
+[pi-sub] 💾 Saved compaction summary (ID: 42, 18432 tokens, 1234 chars summary, 5234 chars detailed)
+[pi-sub] 🔑 Saved 13 keywords for compaction 42 (8 files, 3 decisions, 2 lessons)
 [pi-sub] 🔇 Agent abc123: no-inject mode — showing result in UI only
 [pi-sub] ✂️ Truncated large tool output to prevent context overflow
 ```
@@ -483,6 +577,12 @@ ctx_search "seq"
 
 # Получить полный вывод
 ctx_search "id:1"
+
+# Поиск по ключевым словам
+/memory-keywords WAL
+
+# Тест всех операций
+/memory-test
 ```
 
 ---
@@ -559,10 +659,12 @@ pi.on("tool_call", (event, ctx) => {
 |-----------|------------|
 | Переопределённые инструменты | 5 (bash, read, grep, find, ls) |
 | Новые инструменты | 1 (ctx_search) |
-| Команды pi-sub | 13 |
+| Команды pi-sub | 14 |
 | События pi-sub | 7 |
 | События loop-police | 5 |
 | Фоновые процессы | 5 |
+| Таблицы БД | 6 |
+| FTS5 индексов | 6 |
 
 ---
 
@@ -580,7 +682,8 @@ pi.on("tool_call", (event, ctx) => {
 2. **Кастомный system prompt**: ~300 токенов вместо ~2400 (экономия 88%)
 3. **Контекст-сохраняющие инструменты**: Большие выводы не забивают контекст
 4. **FTS5 поиск**: Мгновенный поиск по всем сохранённым выводам
-5. **Автоматическая память**: Факты извлекаются без участия пользователя
-6. **Параллелизм**: До 4 субагентов одновременно
-7. **Loop detection**: Защита от зацикливания и бесконечных циклов
-8. **Динамические пути**: БД всегда в корневом `.pi/memory/`
+5. **Нормализованные ключевые слова**: Точный поиск по решениям, урокам, файлам
+6. **Автоматическая память**: Факты извлекаются без участия пользователя
+7. **Параллелизм**: До 4 субагентов одновременно
+8. **Loop detection**: Защита от зацикливания и бесконечных циклов
+9. **Динамические пути**: БД всегда в корневом `.pi/memory/`

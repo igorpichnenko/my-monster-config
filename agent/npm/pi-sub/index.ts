@@ -6,6 +6,7 @@
  * Phase 4A: Session memory — automatic fact extraction
  * Phase 4B: Inject relevant facts into subagent prompts
  * Phase 4C: Custom system prompt with memory policy
+ * Phase 5: Normalized compaction keywords for better search
  */
 
 import { dirname, join } from "node:path";
@@ -98,14 +99,29 @@ Current working directory: ${process.cwd()}`;
 // ============================================================================
 
 /**
+ * Метаданные компакции для сохранения в нормализованную таблицу.
+ */
+export interface CompactionMeta {
+  keyFiles: string[];
+  keyDecisions: string[];
+  keyLessons: string[];
+}
+
+/**
  * Генерирует структурированный дамп из messagesToSummarize.
  * Включает: ключевые решения, файлы, код, контекст — всё индексируется FTS5.
+ * Также возвращает метаданные для сохранения в compaction_keywords.
  */
 function generateCompactionDetailedSummary(
   messagesToSummarize: any[],
   tokensBefore: number
-): string {
+): { detailed: string; meta: CompactionMeta } {
   const sections: string[] = [];
+  const meta: CompactionMeta = {
+    keyFiles: [],
+    keyDecisions: [],
+    keyLessons: [],
+  };
 
   // 1. Сводка
   sections.push(`## Context Summary`);
@@ -121,18 +137,29 @@ function generateCompactionDetailedSummary(
   // 2. Извлечённые решения и выводы
   const decisions: string[] = [];
   const lessons: string[] = [];
+  
   messagesToSummarize.forEach((m) => {
-    // Исправлено: безопасное извлечение текста
     const text = Array.isArray(m.content)
       ? m.content.map((c: any) => c.text || "").join(" ")
       : (typeof m.content === "string" ? m.content : "");
     
     const lower = text.toLowerCase();
+    
     if (lower.includes("decision") || lower.includes("решили") || lower.includes("решил")) {
-      decisions.push(text.slice(0, 200));
+      // Извлекаем короткую фразу (до 50 символов)
+      const decision = text.slice(0, 50).trim();
+      if (decision.length > 10) {
+        decisions.push(decision);
+        meta.keyDecisions.push(decision);
+      }
     }
+    
     if (lower.includes("lesson") || lower.includes("важно") || lower.includes("проблема")) {
-      lessons.push(text.slice(0, 200));
+      const lesson = text.slice(0, 50).trim();
+      if (lesson.length > 10) {
+        lessons.push(lesson);
+        meta.keyLessons.push(lesson);
+      }
     }
   });
 
@@ -158,12 +185,28 @@ function generateCompactionDetailedSummary(
       : (typeof m.content === "string" ? m.content : "");
     
     // Ищем пути файлов
-    text.match(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?([^\s"']+\.ts|tsx|js|json|md|yaml|yml)/gi)?.forEach((f) => files.add(f));
+    const fileMatches = text.match(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?([^\s"']+\.ts|tsx|js|json|md|yaml|yml)/gi);
+    if (fileMatches) {
+      fileMatches.forEach((match) => {
+        const file = match.replace(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?/, "").trim();
+        if (file) {
+          files.add(file);
+          meta.keyFiles.push(file);
+        }
+      });
+    }
+    
     // Ищем import/require
-    text.match(/from\s+["']([^"']+)["']/g)?.forEach((match) => {
-      const path = match.replace(/from\s+["']?/, "").replace(/"/g, "");
-      if (path.startsWith("./") || path.startsWith("../")) files.add(path);
-    });
+    const importMatches = text.match(/from\s+["']([^"']+)["']/g);
+    if (importMatches) {
+      importMatches.forEach((match) => {
+        const path = match.replace(/from\s+["']?/, "").replace(/["']/g, "");
+        if (path.startsWith("./") || path.startsWith("../")) {
+          files.add(path);
+          meta.keyFiles.push(path);
+        }
+      });
+    }
   });
 
   if (files.size > 0) {
@@ -202,7 +245,10 @@ function generateCompactionDetailedSummary(
     });
   }
 
-  return sections.join("\n");
+  return { 
+    detailed: sections.join("\n"), 
+    meta 
+  };
 }
 
 // ============================================================================
@@ -222,6 +268,7 @@ export default function (pi: ExtensionAPI) {
         `Tool outputs: ${stats.toolOutputs}, ` +
         `Subagent results: ${stats.subagentResults}, ` +
         `Session facts: ${stats.sessionFacts}, ` +
+        `Compaction keywords: ${stats.compactionKeywords}, ` +
         `Size: ${stats.dbSizeMb.toFixed(2)} MB`,
     );
   } catch (err) {
@@ -265,8 +312,9 @@ export default function (pi: ExtensionAPI) {
   // Agent Manager
   // ==========================================================================
   
-  // Храним detailed_summary из session_before_compact для использования в compaction_end
+  // Храним detailed_summary и meta из session_before_compact для использования в compaction_end
   let pendingDetailedSummary: string | null = null;
+  let pendingMeta: CompactionMeta | null = null;
   
   const agentActivity = new Map<string, AgentActivity>();
   const manager = new AgentManager(
@@ -359,50 +407,88 @@ export default function (pi: ExtensionAPI) {
         description: record.description,
       });
     },
-   (record, info) => {
-  // Сохраняем summary компакции в БД (LLM-generated + detailed_summary)
-  // ВАЖНО: detailed_summary доступен только для основного агента,
-  // так как session_before_compact срабатывает только для него.
-  // Для субагентов сохраняем только summary (без detailed).
-  
-  if (memoryDb && info.summary && info.tokensBefore > 0) {
-    try {
-      // Определяем основной ли это агент (не субагент)
-      // У основного агента нет agent_type в record, либо он "main"
-      const isMainAgent = !record.type || record.type === "main";
-      
-      memoryDb.saveCompactionSummary({
-        sessionId: sessionMemory?.getSessionId() || "unknown",
+    (record, info) => {
+      // Сохраняем summary компакции в БД (LLM-generated + detailed_summary)
+      if (memoryDb && info.summary && info.tokensBefore > 0) {
+        try {
+          const isMainAgent = !record.type || record.type === "main";
+          
+          // Сохраняем summary
+          const compactionId = memoryDb.saveCompactionSummary({
+            sessionId: sessionMemory?.getSessionId() || "unknown",
+            reason: info.reason,
+            tokensBefore: info.tokensBefore,
+            summary: info.summary,
+            detailedSummary: isMainAgent ? (pendingDetailedSummary || "") : "",
+          });
+          
+          console.log(
+            `[pi-sub] 💾 Saved compaction summary (ID: ${compactionId}, ${info.tokensBefore} tokens, ` +
+            `${info.summary.length} chars summary, ` +
+            `${isMainAgent ? (pendingDetailedSummary?.length || 0) : 0} chars detailed)` +
+            `${isMainAgent ? '' : ' [subagent — no detailed]'}`,
+          );
+          
+          // Сохраняем ключевые слова в нормализованную таблицу
+          if (isMainAgent && pendingMeta) {
+            const keywords: Array<{
+              compactionId: number;
+              keyword: string;
+              category: "file" | "decision" | "lesson";
+            }> = [];
+            
+            // Добавляем файлы
+            for (const file of pendingMeta.keyFiles.slice(0, 10)) {
+              keywords.push({
+                compactionId,
+                keyword: file,
+                category: "file",
+              });
+            }
+            
+            // Добавляем решения
+            for (const decision of pendingMeta.keyDecisions.slice(0, 5)) {
+              keywords.push({
+                compactionId,
+                keyword: decision,
+                category: "decision",
+              });
+            }
+            
+            // Добавляем уроки
+            for (const lesson of pendingMeta.keyLessons.slice(0, 5)) {
+              keywords.push({
+                compactionId,
+                keyword: lesson,
+                category: "lesson",
+              });
+            }
+            
+            if (keywords.length > 0) {
+              const saved = memoryDb.saveCompactionKeywords(keywords);
+              console.log(
+                `[pi-sub] 🔑 Saved ${saved} keywords for compaction ${compactionId} ` +
+                `(${pendingMeta.keyFiles.length} files, ${pendingMeta.keyDecisions.length} decisions, ${pendingMeta.keyLessons.length} lessons)`
+              );
+            }
+          }
+          
+          pendingDetailedSummary = null;
+          pendingMeta = null;
+        } catch (err) {
+          console.error(`[pi-sub] Failed to save compaction summary:`, err);
+        }
+      }
+
+      pi.events.emit("subagents:compacted", {
+        id: record.id,
+        type: record.type,
+        description: record.description,
         reason: info.reason,
         tokensBefore: info.tokensBefore,
-        summary: info.summary,
-        detailedSummary: isMainAgent ? (pendingDetailedSummary || "") : "",
+        compactionCount: record.compactionCount,
       });
-      
-      console.log(
-        `[pi-sub] 💾 Saved compaction summary (${info.tokensBefore} tokens, ` +
-        `${info.summary.length} chars summary, ` +
-        `${isMainAgent ? (pendingDetailedSummary?.length || 0) : 0} chars detailed)` +
-        `${isMainAgent ? '' : ' [subagent — no detailed]'}`,
-      );
-      
-      if (isMainAgent) {
-        pendingDetailedSummary = null; // Очищаем только после использования основным агентом
-      }
-    } catch (err) {
-      console.error(`[pi-sub] Failed to save compaction summary:`, err);
-    }
-  }
-
-  pi.events.emit("subagents:compacted", {
-    id: record.id,
-    type: record.type,
-    description: record.description,
-    reason: info.reason,
-    tokensBefore: info.tokensBefore,
-    compactionCount: record.compactionCount,
-  });
-},
+    },
   );
 
   // Expose manager via Symbol.for() global registry
@@ -519,7 +605,7 @@ export default function (pi: ExtensionAPI) {
 
   // ==========================================================================
   // ФАЗА 4A: Автоматическое извлечение фактов перед сжатием контекста
-  //         + сохранение сжатого контекста компакции
+  //         + генерация detailed_summary и метаданных для compaction_keywords
   // ==========================================================================
   pi.on("session_before_compact", async (event: any, ctx) => {
     if (!sessionMemory) return;
@@ -549,7 +635,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // ==========================================================================
-    // Генерируем detailed_summary компакции (структурированный дамп для ctx_search)
+    // Генерируем detailed_summary компакции и метаданные для ctx_search
     // ==========================================================================
     try {
       const preparation = event?.preparation;
@@ -560,12 +646,15 @@ export default function (pi: ExtensionAPI) {
       const messagesToSummarize = preparation.messagesToSummarize || [];
       if (messagesToSummarize.length === 0) return;
 
-      // Генерируем структурированный дамп для ctx_search
-      pendingDetailedSummary = generateCompactionDetailedSummary(messagesToSummarize, preparation.tokensBefore);
+      // Генерируем структурированный дамп и метаданные
+      const result = generateCompactionDetailedSummary(messagesToSummarize, preparation.tokensBefore);
+      pendingDetailedSummary = result.detailed;
+      pendingMeta = result.meta;
 
       console.log(
         `[pi-sub] 📦 Generated compaction detailed_summary: ${messagesToSummarize.length} msgs, ` +
-        `${pendingDetailedSummary.length} chars`,
+        `${pendingDetailedSummary.length} chars, ` +
+        `${pendingMeta.keyFiles.length} files, ${pendingMeta.keyDecisions.length} decisions, ${pendingMeta.keyLessons.length} lessons`,
       );
     } catch (err) {
       console.error(`[pi-sub] ❌ Failed to generate compaction detailed_summary:`, err);

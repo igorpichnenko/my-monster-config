@@ -19,6 +19,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
       try {
         const stats = memoryDb.getStats();
         const recentFacts = memoryDb.getRecentFacts(5);
+        const keywordsStats = memoryDb.getKeywordsStats();
         
         const lines = [
           `📊 Memory Database Statistics`,
@@ -28,8 +29,18 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Session facts: ${stats.sessionFacts}`,
           `Compressed results: ${stats.compressedResults}`,
           `Compaction summaries: ${stats.compactionSummaries}`,
+          `Compaction keywords: ${stats.compactionKeywords}`,
           `Database size: ${stats.dbSizeMb.toFixed(2)} MB`,
         ];
+        
+        if (keywordsStats.total > 0) {
+          lines.push(``);
+          lines.push(`🔑 Keywords breakdown:`);
+          lines.push(`  📄 Files: ${keywordsStats.byCategory.file}`);
+          lines.push(`  🎯 Decisions: ${keywordsStats.byCategory.decision}`);
+          lines.push(`  💡 Lessons: ${keywordsStats.byCategory.lesson}`);
+          lines.push(`  Unique keywords: ${keywordsStats.uniqueKeywords}`);
+        }
         
         if (recentFacts.length > 0) {
           lines.push(``);
@@ -116,8 +127,28 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         const cached = memoryDb.getCompressedResult("test-hash-123");
         results.push(`✅ Compressed cache: ${cached === "compressed text from test" ? "OK" : "FAIL"}`);
         
+        // Тест compaction_keywords
+        const compactionId = memoryDb.saveCompactionSummary({
+          sessionId: `session-${Date.now()}`,
+          reason: "threshold",
+          tokensBefore: 10000,
+          summary: "Test compaction summary",
+          detailedSummary: "## Key Decisions\n1. Test decision",
+        });
+        results.push(`✅ Compaction summary saved (ID: ${compactionId})`);
+        
+        const keywordId = memoryDb.saveCompactionKeyword({
+          compactionId,
+          keyword: "test-decision",
+          category: "decision",
+        });
+        results.push(`✅ Compaction keyword saved (ID: ${keywordId})`);
+        
+        const keywordSearch = memoryDb.searchKeywords("test-decision", 5);
+        results.push(`✅ Keyword search: ${keywordSearch.length} results`);
+        
         const stats = memoryDb.getStats();
-        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.dbSizeMb.toFixed(2)} MB`);
+        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.dbSizeMb.toFixed(2)} MB`);
         
         cmdCtx.ui.notify(`🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n💡 Use /memory-stats to see full statistics.`, "info");
       } catch (err) {
@@ -153,6 +184,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         const deletedFacts = memoryDb.purgeOldFacts(factsDays);
         const deletedSummaries = memoryDb.purgeOldCompactionSummaries(factsDays);
         const deletedCompressed = memoryDb.purgeOldCompressedResults(factsDays);
+        const deletedKeywords = memoryDb.purgeOldKeywords(factsDays);
         const statsAfter = memoryDb.getStats();
         
         const lines = [
@@ -162,9 +194,10 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Session facts (> ${factsDays} days): deleted ${deletedFacts}`,
           `Compaction summaries (> ${factsDays} days): deleted ${deletedSummaries}`,
           `Compressed results (> ${factsDays} days): deleted ${deletedCompressed}`,
+          `Compaction keywords (> ${factsDays} days): deleted ${deletedKeywords}`,
           ``,
-          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
-          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
+          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.compactionKeywords} keywords, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
+          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.compactionKeywords} keywords, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
         ];
         
         cmdCtx.ui.notify(lines.join("\n"), "info");
@@ -236,7 +269,6 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           lines.push(``);
         }
 
-        // НОВОЕ: поиск по compressed_results
         const compressedResults = memoryDb.searchCompressedResults(query, 5);
         if (compressedResults.length > 0) {
           lines.push(`🗜️ Compressed results (${compressedResults.length}):`);
@@ -244,6 +276,25 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
             const date = new Date(c.timestamp).toLocaleString();
             lines.push(`  [ID:${c.id}] ${c.original_hash.slice(0, 16)} (${date})`);
             lines.push(`    ${c.compressed.slice(0, 80)}`);
+          }
+          lines.push(``);
+        }
+
+        // НОВОЕ: поиск по compaction_keywords
+        const keywordResults = memoryDb.searchKeywords(query, 5);
+        if (keywordResults.length > 0) {
+          lines.push(`🔑 Compaction keywords (${keywordResults.length}):`);
+          for (const k of keywordResults) {
+            const date = new Date(k.compaction_timestamp).toLocaleString();
+            const categoryIcons: Record<string, string> = {
+              file: "📄",
+              decision: "🎯",
+              lesson: "💡",
+            };
+            const icon = categoryIcons[k.category] || "🔑";
+            lines.push(`  ${icon} [${k.category}] ${k.keyword}`);
+            lines.push(`    Compaction ID: ${k.compaction_id} (${k.compaction_reason}, ${k.compaction_tokens_before} tokens)`);
+            lines.push(`    Date: ${date}`);
           }
           lines.push(``);
         }
@@ -357,6 +408,99 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           
           lines.push(`  💡 Use ctx_search "id:${s.id}" to see full content`);
           lines.push(``);
+        }
+
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // /memory-keywords [query] — Показать ключевые слова компакций
+  pi.registerCommand("memory-keywords", {
+    description: "Show compaction keywords: /memory-keywords [query]",
+    handler: async (argStr, cmdCtx) => {
+      if (!memoryDb) {
+        cmdCtx.ui.notify("❌ Memory database not initialized", "error");
+        return;
+      }
+
+      const query = argStr.trim();
+      const stats = memoryDb.getKeywordsStats();
+
+      if (stats.total === 0) {
+        cmdCtx.ui.notify(
+          `🔑 No compaction keywords saved yet.\n` +
+          `Keywords are extracted automatically during compaction.`,
+          "info"
+        );
+        return;
+      }
+
+      try {
+        const lines = [
+          `🔑 Compaction Keywords Statistics`,
+          ``,
+          `Total keywords: ${stats.total}`,
+          `Unique keywords: ${stats.uniqueKeywords}`,
+          ``,
+          `By category:`,
+          `  📄 Files: ${stats.byCategory.file}`,
+          `  🎯 Decisions: ${stats.byCategory.decision}`,
+          `  💡 Lessons: ${stats.byCategory.lesson}`,
+          ``,
+        ];
+
+        if (query) {
+          // Поиск по запросу
+          const results = memoryDb.searchKeywords(query, 20);
+          
+          if (results.length === 0) {
+            lines.push(`No keywords found for: "${query}"`);
+          } else {
+            lines.push(`🔍 Search results for: "${query}" (${results.length} found)`);
+            lines.push(``);
+            
+            for (const r of results) {
+              const categoryIcons: Record<string, string> = {
+                file: "📄",
+                decision: "🎯",
+                lesson: "💡",
+              };
+              const icon = categoryIcons[r.category] || "🔑";
+              const date = new Date(r.compaction_timestamp).toLocaleString();
+              
+              lines.push(`${icon} [${r.category}] ${r.keyword}`);
+              lines.push(`  Compaction ID: ${r.compaction_id} (${r.compaction_reason}, ${r.compaction_tokens_before} tokens)`);
+              lines.push(`  Date: ${date}`);
+              lines.push(`  💡 Use ctx_search "id:${r.compaction_id}" to see full summary`);
+              lines.push(``);
+            }
+          }
+        } else {
+          // Показать последние ключевые слова
+          const recent = memoryDb.getRecentKeywords(20);
+          
+          lines.push(`📋 Recent keywords (last 20):`);
+          lines.push(``);
+          
+          for (const kw of recent) {
+            const categoryIcons: Record<string, string> = {
+              file: "📄",
+              decision: "🎯",
+              lesson: "💡",
+            };
+            const icon = categoryIcons[kw.category] || "🔑";
+            const date = new Date(kw.timestamp).toLocaleString();
+            
+            lines.push(`${icon} [${kw.category}] ${kw.keyword}`);
+            lines.push(`  Compaction ID: ${kw.compaction_id} | Date: ${date}`);
+            lines.push(``);
+          }
+          
+          lines.push(`💡 Use /memory-keywords <query> to search`);
+          lines.push(`💡 Use ctx_search "id:<compaction_id>" to see full summary`);
         }
 
         cmdCtx.ui.notify(lines.join("\n"), "info");

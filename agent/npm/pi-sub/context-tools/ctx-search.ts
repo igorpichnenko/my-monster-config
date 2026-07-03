@@ -7,11 +7,12 @@
  * - session_facts (извлечённые факты сессий)
  * - compaction_summaries (summary компакции контекста)
  * - compressed_results (сжатые результаты)
+ * - compaction_keywords (нормализованные ключевые слова компакций)
  * 
  * Поддерживает специальный запрос "id:<number>" для получения полного вывода.
  */
 
-import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult } from "../memory/database.js";
+import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword } from "../memory/database.js";
 
 export interface CtxSearchArgs {
   query: string;
@@ -19,7 +20,7 @@ export interface CtxSearchArgs {
 }
 
 interface SearchResult {
-  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result";
+  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keyword";
   id: number | string;
   title: string;
   date: string;
@@ -93,6 +94,44 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
+    // 6. Ищем в compaction_keywords (возвращаем все ключевые слова компакции)
+    const keywords = db.getCompactionKeywords(id);
+    if (keywords.length > 0) {
+      const compaction = db.getCompactionSummaryById(keywords[0].compaction_id);
+      let result = `━━━ Compaction Keywords [Compaction ID: ${keywords[0].compaction_id}] ━━━\n`;
+      if (compaction) {
+        result += `Reason: ${compaction.reason}\n`;
+        result += `Tokens before: ${compaction.tokens_before}\n`;
+        result += `Date: ${new Date(compaction.timestamp).toLocaleString()}\n\n`;
+      }
+      
+      const byCategory: Record<string, string[]> = {
+        file: [],
+        decision: [],
+        lesson: [],
+      };
+      
+      for (const kw of keywords) {
+        byCategory[kw.category].push(kw.keyword);
+      }
+      
+      if (byCategory.file.length > 0) {
+        result += `## Files\n${byCategory.file.map(f => `- ${f}`).join("\n")}\n\n`;
+      }
+      if (byCategory.decision.length > 0) {
+        result += `## Decisions\n${byCategory.decision.map(d => `- ${d}`).join("\n")}\n\n`;
+      }
+      if (byCategory.lesson.length > 0) {
+        result += `## Lessons\n${byCategory.lesson.map(l => `- ${l}`).join("\n")}\n\n`;
+      }
+      
+      if (compaction) {
+        result += `💡 Use ctx_search "id:${compaction.id}" to get full detailed summary`;
+      }
+      
+      return result;
+    }
+    
     return `❌ No result found with ID: ${id}`;
   }
   
@@ -152,7 +191,7 @@ export function executeCtxSearch(
       });
     }
     
-    // 5. Compressed results (НОВОЕ!)
+    // 5. Compressed results
     const compressedResults = db.searchCompressedResults(query, limit);
     for (const r of compressedResults) {
       allResults.push({
@@ -162,6 +201,29 @@ export function executeCtxSearch(
         date: new Date(r.timestamp).toLocaleString(),
         preview: r.compressed.slice(0, 150),
         extra: { Hash: r.original_hash },
+      });
+    }
+    
+    // 6. Compaction keywords (НОВОЕ!)
+    const keywordResults = db.searchKeywords(query, limit);
+    for (const r of keywordResults) {
+      const categoryIcons: Record<string, string> = {
+        file: "📄",
+        decision: "🎯",
+        lesson: "💡",
+      };
+      const icon = categoryIcons[r.category] || "🔑";
+      
+      allResults.push({
+        type: "compaction_keyword",
+        id: r.compaction_id,
+        title: `${icon} Keyword: [${r.category}] ${r.keyword}`,
+        date: new Date(r.compaction_timestamp).toLocaleString(),
+        preview: `Compaction: ${r.compaction_reason}, ${r.compaction_tokens_before} tokens`,
+        extra: { 
+          Category: r.category,
+          "Compaction ID": String(r.compaction_id),
+        },
       });
     }
     
@@ -178,7 +240,8 @@ export function executeCtxSearch(
              `  • subagent_results — subagent execution results\n` +
              `  • session_facts — extracted session facts\n` +
              `  • compaction_summaries — context compaction summaries\n` +
-             `  • compressed_results — compressed cached results`;
+             `  • compressed_results — compressed cached results\n` +
+             `  • compaction_keywords — normalized keywords from compactions`;
     }
     
     // Подсчёт по типам
@@ -197,6 +260,7 @@ export function executeCtxSearch(
         session_fact: "📝",
         compaction_summary: "📦",
         compressed_result: "🗜️",
+        compaction_keyword: "🔑",
       };
       const icon = typeIcons[result.type] || "📄";
       
