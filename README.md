@@ -14,6 +14,7 @@
 | **Забывание между сессиями** | Автоматическое извлечение фактов | ✅ Модель помнит контекст |
 | **Зацикливание агентов** | Loop-police детектит повторы | ✅ Экономия токенов |
 | **Огромный system prompt** | Кастомный промпт (~300 токенов) | ✅ Быстрый первый ответ |
+| **Потеря данных субагентов** | Compact сохраняется для всех агентов | ✅ Полная история работы |
 
 ---
 
@@ -95,6 +96,7 @@ ctx_search({ query: "id:42" })  # полный вывод по ID
 - Полнотекстовый поиск (FTS5) по всем сохранённым выводам
 - Поиск по tool_name, args, output, summary
 - Специальный запрос `id:<n>` для получения полного вывода
+- Группировка keywords по компакциям (одна компакция = одна строка)
 
 ### Встроенные инструменты (pi-coding-agent)
 
@@ -237,8 +239,10 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | `session_shutdown` | Abort всех, dispose |
 | `tool_execution_start` | Обновление UI виджета |
 | `tool_result` | Обрезка вывода до 5KB |
-| `session_before_compact` | Извлечение фактов + генерация detailed_summary + метаданных |
+| `session_before_compact` | Извлечение фактов (только для main agent) |
 | `before_agent_start` | Кастомный system prompt с memory policy |
+
+**Примечание:** Генерация `detailed_summary` и `meta` происходит в `agent-runner.ts` при событии `compaction_end` для **всех агентов** (main + subagents). Это позволяет сохранять полную историю работы субагентов.
 
 ### loop-police
 
@@ -364,9 +368,9 @@ ctx_search({ query: "WAL mode" })
 - `tool_outputs` — прошлые выводы bash/read/grep/find/ls
 - `subagent_results` — результаты прошлых субагентов
 - `session_facts` — извлечённые факты
-- `compaction_summaries` — summaries компакций
+- `compaction_summaries` — summaries компакций (main + subagents)
 - `compressed_results` — сжатые результаты
-- `compaction_keywords` — нормализованные ключевые слова
+- `compaction_keywords` — нормализованные ключевые слова (main + subagents)
 
 ### Поиск корневого `.pi`
 
@@ -397,11 +401,23 @@ api: "endpoint", "route", "auth", "API"
 
 **Процесс:**
 
-1. Перед `session_before_compact` анализируются сообщения
+1. Перед `session_before_compact` анализируются сообщения (только main agent)
 2. Применяются regex-паттерны
 3. Фильтрация по длине (20-500 символов)
 4. Проверка дубликатов (hash)
 5. Сохранение в `session_facts`
+
+### Компакции для всех агентов (Phase 6)
+
+При компакции контекста **любого агента** (main или subagent) автоматически:
+
+1. **Генерируется `detailed_summary`** — структурированный дамп с решениями, файлами, кодом
+2. **Извлекаются ключевые слова** — файлы, решения, уроки
+3. **Сохраняется в БД** — `compaction_summaries` + `compaction_keywords`
+
+**Где генерируется:** В `agent-runner.ts` при событии `compaction_end` — это гарантирует, что данные создаются для всех агентов, включая субагентов.
+
+**Утилита:** `context-tools/utils/compaction-summary.ts` — переиспользуемая функция `generateCompactionDetailedSummary()`.
 
 ### Нормализованные ключевые слова компакций
 
@@ -417,6 +433,7 @@ api: "endpoint", "route", "auth", "API"
 - Можно искать по категории: `category:decision AND WAL`
 - Нет дублирования — только ссылки на `compaction_summaries`
 - Масштабируемо — можно добавить миллионы ключевых слов
+- **Работает для всех агентов** (main + subagents)
 
 **Пример поиска:**
 
@@ -429,6 +446,9 @@ ctx_search "database.ts"
 
 # Получить полный detailed_summary
 ctx_search "id:42"
+
+# Найти компакции субагента research
+/memory-keywords research
 ```
 
 ### Инжекция в промпт
@@ -451,7 +471,7 @@ const memoryBlock = `# Session Memory\n${relevantFacts.join("\n")}`;
 pi-sub/
 ├── index.ts                    # Точка входа, инициализация
 ├── agent-manager.ts            # Управление жизненным циклом
-├── agent-runner.ts             # Ядро выполнения
+├── agent-runner.ts             # Ядро выполнения + генерация compaction summary
 ├── agent-types.ts              # Реестр типов агентов
 ├── custom-agents.ts            # Загрузка из .pi/agents/
 ├── default-agents.ts           # Встроенные агенты
@@ -472,7 +492,8 @@ pi-sub/
 │   ├── ctx-search.ts           # ctx_search (FTS5)
 │   └── utils/
 │       ├── analyzers.ts        # Анализаторы вывода
-│       └── summary.ts          # Генерация summary
+│       ├── summary.ts          # Генерация summary
+│       └── compaction-summary.ts # Генерация detailed_summary + meta (Phase 6)
 ├── ui/
 │   └── agent-widget.ts         # Виджет статуса (80ms)
 └── renderers/
@@ -498,7 +519,8 @@ AgentRunner.runAgent()
     │   └── Кастомный промпт с memory policy
     ├── Запускает agent loop
     │   ├── LLM вызывает инструменты
-    │   └── Инструменты сохраняют большие выводы в БД
+    │   ├── Инструменты сохраняют большие выводы в БД
+    │   └── При compaction_end → генерирует detailed_summary + meta (Phase 6)
     └── Собирает результат
     │
     ▼
@@ -506,6 +528,11 @@ onComplete callback
     ├── Сохраняет результат в subagent_results
     ├── Если !noInject → инжектирует в родителя
     └── Обновляет UI виджет
+    │
+    ▼
+onCompact callback (Phase 6)
+    ├── Сохраняет summary + detailed_summary в compaction_summaries
+    └── Сохраняет keywords в compaction_keywords
 ```
 
 ### Типы агентов
@@ -546,12 +573,16 @@ sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM tool_outputs;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM subagent_results;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM session_facts;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM compaction_keywords;"
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM compaction_summaries;"
 
 # Последние записи
 sqlite3 .pi/memory/unified.db "SELECT id, tool_name, size FROM tool_outputs ORDER BY timestamp DESC LIMIT 5;"
 
 # Статистика ключевых слов
 sqlite3 .pi/memory/unified.db "SELECT category, COUNT(*) FROM compaction_keywords GROUP BY category;"
+
+# Компакции по агентам (Phase 6)
+sqlite3 .pi/memory/unified.db "SELECT id, reason, tokens_before, length(detailed_summary) as detailed_len FROM compaction_summaries ORDER BY timestamp DESC LIMIT 5;"
 ```
 
 ### Логи
@@ -559,8 +590,8 @@ sqlite3 .pi/memory/unified.db "SELECT category, COUNT(*) FROM compaction_keyword
 ```
 [pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Size: 12.5 MB
 [pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
-[pi-sub] 📦 Generated compaction detailed_summary: 47 msgs, 5234 chars, 8 files, 3 decisions, 2 lessons
-[pi-sub] 💾 Saved compaction summary (ID: 42, 18432 tokens, 1234 chars summary, 5234 chars detailed)
+[pi-sub] 📦 Generated compaction summary for agent abc123: 47 msgs, 5234 chars, 8 files, 3 decisions, 2 lessons
+[pi-sub] 💾 Saved compaction summary (ID: 42, agent: research, 18432 tokens, 1234 chars summary, 5234 chars detailed)
 [pi-sub] 🔑 Saved 13 keywords for compaction 42 (8 files, 3 decisions, 2 lessons)
 [pi-sub] 🔇 Agent abc123: no-inject mode — showing result in UI only
 [pi-sub] ✂️ Truncated large tool output to prevent context overflow
@@ -683,7 +714,10 @@ pi.on("tool_call", (event, ctx) => {
 3. **Контекст-сохраняющие инструменты**: Большие выводы не забивают контекст
 4. **FTS5 поиск**: Мгновенный поиск по всем сохранённым выводам
 5. **Нормализованные ключевые слова**: Точный поиск по решениям, урокам, файлам
-6. **Автоматическая память**: Факты извлекаются без участия пользователя
-7. **Параллелизм**: До 4 субагентов одновременно
-8. **Loop detection**: Защита от зацикливания и бесконечных циклов
-9. **Динамические пути**: БД всегда в корневом `.pi/memory/`
+6. **Компакции для всех агентов**: detailed_summary и keywords сохраняются для main + subagents
+7. **Автоматическая память**: Факты извлекаются без участия пользователя
+8. **Параллелизм**: До 4 субагентов одновременно
+9. **Loop detection**: Защита от зацикливания и бесконечных циклов
+10. **Динамические пути**: БД всегда в корневом `.pi/memory/`
+11. **Группировка результатов**: Keywords группируются по компакциям в ctx_search
+12. **Увеличенный preview**: 500 символов для detailed_summary вместо 150
