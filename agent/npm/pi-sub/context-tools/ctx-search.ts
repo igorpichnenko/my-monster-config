@@ -20,7 +20,7 @@ export interface CtxSearchArgs {
 }
 
 interface SearchResult {
-  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keyword";
+  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keywords_group";
   id: number | string;
   title: string;
   date: string;
@@ -94,42 +94,50 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
-    // 6. Ищем в compaction_keywords (возвращаем все ключевые слова компакции)
+    // 6. Ищем в compaction_keywords — ИСПРАВЛЕНИЕ ПРОБЛЕМЫ 4
+    // Если нашли keyword, показываем detailed_summary соответствующей компакции
     const keywords = db.getCompactionKeywords(id);
     if (keywords.length > 0) {
-      const compaction = db.getCompactionSummaryById(keywords[0].compaction_id);
-      let result = `━━━ Compaction Keywords [Compaction ID: ${keywords[0].compaction_id}] ━━━\n`;
+      const compactionId = keywords[0].compaction_id;
+      const compaction = db.getCompactionSummaryById(compactionId);
+      
       if (compaction) {
+        // Показываем detailed_summary компакции, а не keywords
+        let result = `━━━ Compaction Summary [ID: ${compaction.id}] ━━━\n`;
+        result += `(Found via keyword ID: ${id})\n\n`;
         result += `Reason: ${compaction.reason}\n`;
         result += `Tokens before: ${compaction.tokens_before}\n`;
         result += `Date: ${new Date(compaction.timestamp).toLocaleString()}\n\n`;
+        result += `## Summary\n${compaction.summary}\n\n`;
+        
+        if (compaction.detailed_summary) {
+          result += `## Detailed Summary\n${compaction.detailed_summary}\n\n`;
+        }
+        
+        // Показываем ключевые слова как дополнение
+        const byCategory: Record<string, string[]> = {
+          file: [],
+          decision: [],
+          lesson: [],
+        };
+        
+        for (const kw of keywords) {
+          byCategory[kw.category].push(kw.keyword);
+        }
+        
+        result += `## Keywords\n`;
+        if (byCategory.file.length > 0) {
+          result += `📄 Files: ${byCategory.file.join(", ")}\n`;
+        }
+        if (byCategory.decision.length > 0) {
+          result += `🎯 Decisions: ${byCategory.decision.join(", ")}\n`;
+        }
+        if (byCategory.lesson.length > 0) {
+          result += `💡 Lessons: ${byCategory.lesson.join(", ")}\n`;
+        }
+        
+        return result;
       }
-      
-      const byCategory: Record<string, string[]> = {
-        file: [],
-        decision: [],
-        lesson: [],
-      };
-      
-      for (const kw of keywords) {
-        byCategory[kw.category].push(kw.keyword);
-      }
-      
-      if (byCategory.file.length > 0) {
-        result += `## Files\n${byCategory.file.map(f => `- ${f}`).join("\n")}\n\n`;
-      }
-      if (byCategory.decision.length > 0) {
-        result += `## Decisions\n${byCategory.decision.map(d => `- ${d}`).join("\n")}\n\n`;
-      }
-      if (byCategory.lesson.length > 0) {
-        result += `## Lessons\n${byCategory.lesson.map(l => `- ${l}`).join("\n")}\n\n`;
-      }
-      
-      if (compaction) {
-        result += `💡 Use ctx_search "id:${compaction.id}" to get full detailed summary`;
-      }
-      
-      return result;
     }
     
     return `❌ No result found with ID: ${id}`;
@@ -178,15 +186,18 @@ export function executeCtxSearch(
       });
     }
     
-    // 4. Compaction summaries
+    // 4. Compaction summaries — ИСПРАВЛЕНИЕ ПРОБЛЕМЫ 3
     const compactionResults = db.searchCompactionSummaries(query, limit);
     for (const r of compactionResults) {
+      // Увеличиваем preview до 500 символов
+      const preview = r.detailed_summary?.slice(0, 500) || r.summary?.slice(0, 300) || "";
+      
       allResults.push({
         type: "compaction_summary",
         id: r.id,
         title: `Compaction: [${r.reason}] ${r.tokens_before} tokens`,
         date: new Date(r.timestamp).toLocaleString(),
-        preview: r.detailed_summary?.slice(0, 150) || r.summary?.slice(0, 150) || "",
+        preview: preview,
         extra: { "Tokens": String(r.tokens_before) },
       });
     }
@@ -204,25 +215,63 @@ export function executeCtxSearch(
       });
     }
     
-    // 6. Compaction keywords (НОВОЕ!)
-    const keywordResults = db.searchKeywords(query, limit);
+    // 6. Compaction keywords — ИСПРАВЛЕНИЕ ПРОБЛЕМ 1+2
+    // Группируем по compaction_id, показываем одну строку на компакцию
+    const keywordResults = db.searchKeywords(query, limit * 3); // Получаем больше для группировки
+    
+    // Группируем по compaction_id
+    const groupedKeywords = new Map<number, {
+      keywords: typeof keywordResults;
+      reason: string;
+      tokens_before: number;
+      timestamp: number;
+    }>();
+    
     for (const r of keywordResults) {
-      const categoryIcons: Record<string, string> = {
-        file: "📄",
-        decision: "🎯",
-        lesson: "💡",
-      };
-      const icon = categoryIcons[r.category] || "🔑";
+      if (!groupedKeywords.has(r.compaction_id)) {
+        groupedKeywords.set(r.compaction_id, {
+          keywords: [],
+          reason: r.compaction_reason,
+          tokens_before: r.compaction_tokens_before,
+          timestamp: r.compaction_timestamp,
+        });
+      }
+      groupedKeywords.get(r.compaction_id)!.keywords.push(r);
+    }
+    
+    // Добавляем сгруппированные результаты
+    for (const [compactionId, group] of groupedKeywords) {
+      const files = group.keywords
+        .filter(k => k.category === "file")
+        .map(k => k.keyword)
+        .slice(0, 3);
+      
+      const decisions = group.keywords
+        .filter(k => k.category === "decision")
+        .map(k => k.keyword)
+        .slice(0, 2);
+      
+      const lessons = group.keywords
+        .filter(k => k.category === "lesson")
+        .map(k => k.keyword)
+        .slice(0, 2);
+      
+      let preview = "";
+      if (files.length > 0) preview += `📄 ${files.join(", ")}`;
+      if (decisions.length > 0) preview += ` | 🎯 ${decisions.join(", ")}`;
+      if (lessons.length > 0) preview += ` | 💡 ${lessons.join(", ")}`;
+      
+      const totalKeywords = group.keywords.length;
       
       allResults.push({
-        type: "compaction_keyword",
-        id: r.compaction_id,
-        title: `${icon} Keyword: [${r.category}] ${r.keyword}`,
-        date: new Date(r.compaction_timestamp).toLocaleString(),
-        preview: `Compaction: ${r.compaction_reason}, ${r.compaction_tokens_before} tokens`,
+        type: "compaction_keywords_group",
+        id: compactionId, // ← Используем compaction_id, а не keyword_id
+        title: `Compaction Keywords: [${group.reason}] ${group.tokens_before} tokens`,
+        date: new Date(group.timestamp).toLocaleString(),
+        preview: preview || `${totalKeywords} keywords found`,
         extra: { 
-          Category: r.category,
-          "Compaction ID": String(r.compaction_id),
+          "Keywords count": String(totalKeywords),
+          "Compaction ID": String(compactionId),
         },
       });
     }
@@ -260,7 +309,7 @@ export function executeCtxSearch(
         session_fact: "📝",
         compaction_summary: "📦",
         compressed_result: "🗜️",
-        compaction_keyword: "🔑",
+        compaction_keywords_group: "🔑",
       };
       const icon = typeIcons[result.type] || "📄";
       
