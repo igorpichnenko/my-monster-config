@@ -23,7 +23,7 @@ export function registerAgentCommands(ctx: PiSubContext): void {
 
   // /agent-bg <prompt>
   pi.registerCommand("agent-bg", {
-    description: "Launch subagent in background: /agent-bg [--no-inject] <prompt>",
+    description: "Launch subagent in background: /agent-bg [--no-inject | --silent] <prompt>",
     handler: async (argStr, cmdCtx) => {
       let prompt = argStr.trim();
       if (!prompt) {
@@ -59,7 +59,7 @@ export function registerAgentCommands(ctx: PiSubContext): void {
         model: (cmdCtx as any).model,
         maxTurns: effectiveMaxTurns,
         isBackground: true,
-        noInject,  // ← НОВОЕ
+        noInject,
         ...bgCallbacks,
       });
 
@@ -132,7 +132,14 @@ export function registerAgentCommands(ctx: PiSubContext): void {
       }
 
       const result = record.result?.trim() || record.error || "No output";
-      cmdCtx.ui.notify(`[Agent ${id}]\n${result}`, "info");
+      
+      // Исправлено: используем template literal (обратные кавычки)
+      let note = "";
+      if (record.noInject) {
+        note = `\n\n🔇 This agent was launched with --no-inject. Use /agent-inject ${id} to inject result manually.`;
+      }
+      
+      cmdCtx.ui.notify(`[Agent ${id}]\n${result}${note}`, "info");
     },
   });
 

@@ -94,6 +94,118 @@ Current working directory: ${process.cwd()}`;
 }
 
 // ============================================================================
+// Генерация структурированного дампа компакции для ctx_search
+// ============================================================================
+
+/**
+ * Генерирует структурированный дамп из messagesToSummarize.
+ * Включает: ключевые решения, файлы, код, контекст — всё индексируется FTS5.
+ */
+function generateCompactionDetailedSummary(
+  messagesToSummarize: any[],
+  tokensBefore: number
+): string {
+  const sections: string[] = [];
+
+  // 1. Сводка
+  sections.push(`## Context Summary`);
+  const byRole = messagesToSummarize.reduce((acc, m) => {
+    acc[m.role] = (acc[m.role] || 0) + 1;
+    return acc;
+  }, {} as Record<string, number>);
+  sections.push(
+    `- Messages: ${messagesToSummarize.length} (${Object.entries(byRole).map(([r, c]) => `${c}x ${r}`).join(", ")})`
+  );
+  sections.push(`- Tokens before compaction: ${tokensBefore}`);
+
+  // 2. Извлечённые решения и выводы
+  const decisions: string[] = [];
+  const lessons: string[] = [];
+  messagesToSummarize.forEach((m) => {
+    // Исправлено: безопасное извлечение текста
+    const text = Array.isArray(m.content)
+      ? m.content.map((c: any) => c.text || "").join(" ")
+      : (typeof m.content === "string" ? m.content : "");
+    
+    const lower = text.toLowerCase();
+    if (lower.includes("decision") || lower.includes("решили") || lower.includes("решил")) {
+      decisions.push(text.slice(0, 200));
+    }
+    if (lower.includes("lesson") || lower.includes("важно") || lower.includes("проблема")) {
+      lessons.push(text.slice(0, 200));
+    }
+  });
+
+  if (decisions.length > 0) {
+    sections.push(`\n## Key Decisions`);
+    decisions.slice(0, 5).forEach((d, i) => {
+      sections.push(`${i + 1}. ${d.trim()}`);
+    });
+  }
+
+  if (lessons.length > 0) {
+    sections.push(`\n## Lessons Learned`);
+    lessons.slice(0, 3).forEach((l, i) => {
+      sections.push(`${i + 1}. ${l.trim()}`);
+    });
+  }
+
+  // 3. Файлы, которые читались/писались
+  const files = new Set<string>();
+  messagesToSummarize.forEach((m) => {
+    const text = Array.isArray(m.content)
+      ? m.content.map((c: any) => c.text || "").join(" ")
+      : (typeof m.content === "string" ? m.content : "");
+    
+    // Ищем пути файлов
+    text.match(/(?:read|write|edit|open|save|modify|openFile|readFile|writeFile)\s*["']?([^\s"']+\.ts|tsx|js|json|md|yaml|yml)/gi)?.forEach((f) => files.add(f));
+    // Ищем import/require
+    text.match(/from\s+["']([^"']+)["']/g)?.forEach((match) => {
+      const path = match.replace(/from\s+["']?/, "").replace(/"/g, "");
+      if (path.startsWith("./") || path.startsWith("../")) files.add(path);
+    });
+  });
+
+  if (files.size > 0) {
+    sections.push(`\n## Affected Files`);
+    sections.push([...files].slice(0, 20).map((f) => `- \`${f}\``).join("\n"));
+  }
+
+  // 4. Фрагменты кода
+  const codeSnippets: string[] = [];
+  messagesToSummarize.forEach((m) => {
+    const text = Array.isArray(m.content)
+      ? m.content.map((c: any) => c.text || "").join(" ")
+      : (typeof m.content === "string" ? m.content : "");
+    
+    // Ищем блоки кода
+    const codeBlocks = text.match(/```[\s\S]*?```/g);
+    if (codeBlocks) {
+      codeBlocks.forEach((block) => {
+        const preview = block.slice(0, 300);
+        codeSnippets.push(preview);
+      });
+    }
+    // Ищем определения функций/классов
+    const defs = text.match(/(?:function|class|export|interface|type)\s+\w+/g);
+    if (defs) {
+      defs.forEach((d) => {
+        if (!codeSnippets.includes(d) && d.length > 10) codeSnippets.push(d);
+      });
+    }
+  });
+
+  if (codeSnippets.length > 0) {
+    sections.push(`\n## Code Context`);
+    codeSnippets.slice(0, 3).forEach((s, i) => {
+      sections.push(`Snippet ${i + 1}:\n\`\`\`\n${s}\n\`\`\``);
+    });
+  }
+
+  return sections.join("\n");
+}
+
+// ============================================================================
 // Главная функция расширения
 // ============================================================================
 
@@ -152,6 +264,10 @@ export default function (pi: ExtensionAPI) {
   // ==========================================================================
   // Agent Manager
   // ==========================================================================
+  
+  // Храним detailed_summary из session_before_compact для использования в compaction_end
+  let pendingDetailedSummary: string | null = null;
+  
   const agentActivity = new Map<string, AgentActivity>();
   const manager = new AgentManager(
     (record) => {
@@ -186,15 +302,27 @@ export default function (pi: ExtensionAPI) {
       });
 
       // Автоматическая инъекция результата в контекст родителя
+      // Если noInject — только показываем результат в UI, НЕ инжектируем
       if (record.result && record.status === "completed") {
         const message = `[Subagent "${record.description}" (ID: ${record.id}) completed]\n\n${record.result}`;
-        pi.sendMessage(
-          { customType: "subagent-result", content: message, display: true },
-          { triggerTurn: true, deliverAs: "steer" },
-        );
-        console.log(
-          `[pi-subagents] Auto-injected result from agent ${record.id} into parent context`,
-        );
+        
+        if (record.noInject) {
+          // no-inject режим: показываем результат в UI без инжекта
+          pi.sendMessage(
+            { customType: "subagent-result-silent", content: message, display: true },
+            { triggerTurn: false, deliverAs: "followUp" },
+          );
+          console.log(`[pi-sub] 🔇 Agent ${record.id}: no-inject mode — showing result in UI only`);
+        } else {
+          // Обычный режим: инжектируем в контекст родителя
+          pi.sendMessage(
+            { customType: "subagent-result", content: message, display: true },
+            { triggerTurn: true, deliverAs: "steer" },
+          );
+          console.log(
+            `[pi-subagents] Auto-injected result from agent ${record.id} into parent context`,
+          );
+        }
       }
 
       // Сохранение результата субагента в БД
@@ -231,16 +359,50 @@ export default function (pi: ExtensionAPI) {
         description: record.description,
       });
     },
-    (record, info) => {
-      pi.events.emit("subagents:compacted", {
-        id: record.id,
-        type: record.type,
-        description: record.description,
+   (record, info) => {
+  // Сохраняем summary компакции в БД (LLM-generated + detailed_summary)
+  // ВАЖНО: detailed_summary доступен только для основного агента,
+  // так как session_before_compact срабатывает только для него.
+  // Для субагентов сохраняем только summary (без detailed).
+  
+  if (memoryDb && info.summary && info.tokensBefore > 0) {
+    try {
+      // Определяем основной ли это агент (не субагент)
+      // У основного агента нет agent_type в record, либо он "main"
+      const isMainAgent = !record.type || record.type === "main";
+      
+      memoryDb.saveCompactionSummary({
+        sessionId: sessionMemory?.getSessionId() || "unknown",
         reason: info.reason,
         tokensBefore: info.tokensBefore,
-        compactionCount: record.compactionCount,
+        summary: info.summary,
+        detailedSummary: isMainAgent ? (pendingDetailedSummary || "") : "",
       });
-    },
+      
+      console.log(
+        `[pi-sub] 💾 Saved compaction summary (${info.tokensBefore} tokens, ` +
+        `${info.summary.length} chars summary, ` +
+        `${isMainAgent ? (pendingDetailedSummary?.length || 0) : 0} chars detailed)` +
+        `${isMainAgent ? '' : ' [subagent — no detailed]'}`,
+      );
+      
+      if (isMainAgent) {
+        pendingDetailedSummary = null; // Очищаем только после использования основным агентом
+      }
+    } catch (err) {
+      console.error(`[pi-sub] Failed to save compaction summary:`, err);
+    }
+  }
+
+  pi.events.emit("subagents:compacted", {
+    id: record.id,
+    type: record.type,
+    description: record.description,
+    reason: info.reason,
+    tokensBefore: info.tokensBefore,
+    compactionCount: record.compactionCount,
+  });
+},
   );
 
   // Expose manager via Symbol.for() global registry
@@ -319,7 +481,7 @@ export default function (pi: ExtensionAPI) {
   // ==========================================================================
   pi.on("tool_result", async (event: any, ctx) => {
     // Ограничиваем размер данных чтобы предотвратить переполнение контекста
-    const MAX_OUTPUT_SIZE = 50000; // 50KB максимум
+    const MAX_OUTPUT_SIZE = 5000; // 5KB максимум
 
     if (!event?.result?.content) return;
 
@@ -357,6 +519,7 @@ export default function (pi: ExtensionAPI) {
 
   // ==========================================================================
   // ФАЗА 4A: Автоматическое извлечение фактов перед сжатием контекста
+  //         + сохранение сжатого контекста компакции
   // ==========================================================================
   pi.on("session_before_compact", async (event: any, ctx) => {
     if (!sessionMemory) return;
@@ -383,6 +546,29 @@ export default function (pi: ExtensionAPI) {
       }
     } catch (err) {
       console.error(`[pi-sub] ❌ Failed to extract facts:`, err);
+    }
+
+    // ==========================================================================
+    // Генерируем detailed_summary компакции (структурированный дамп для ctx_search)
+    // ==========================================================================
+    try {
+      const preparation = event?.preparation;
+
+      if (!preparation) return;
+
+      // messagesToSummarize — массив сообщений, которые будут сжаты
+      const messagesToSummarize = preparation.messagesToSummarize || [];
+      if (messagesToSummarize.length === 0) return;
+
+      // Генерируем структурированный дамп для ctx_search
+      pendingDetailedSummary = generateCompactionDetailedSummary(messagesToSummarize, preparation.tokensBefore);
+
+      console.log(
+        `[pi-sub] 📦 Generated compaction detailed_summary: ${messagesToSummarize.length} msgs, ` +
+        `${pendingDetailedSummary.length} chars`,
+      );
+    } catch (err) {
+      console.error(`[pi-sub] ❌ Failed to generate compaction detailed_summary:`, err);
     }
   });
 

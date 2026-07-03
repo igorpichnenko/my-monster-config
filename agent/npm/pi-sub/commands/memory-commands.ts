@@ -27,6 +27,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Subagent results: ${stats.subagentResults}`,
           `Session facts: ${stats.sessionFacts}`,
           `Compressed results: ${stats.compressedResults}`,
+          `Compaction summaries: ${stats.compactionSummaries}`,
           `Database size: ${stats.dbSizeMb.toFixed(2)} MB`,
         ];
         
@@ -116,7 +117,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         results.push(`✅ Compressed cache: ${cached === "compressed text from test" ? "OK" : "FAIL"}`);
         
         const stats = memoryDb.getStats();
-        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.dbSizeMb.toFixed(2)} MB`);
+        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.dbSizeMb.toFixed(2)} MB`);
         
         cmdCtx.ui.notify(`🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n💡 Use /memory-stats to see full statistics.`, "info");
       } catch (err) {
@@ -150,6 +151,8 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         const statsBefore = memoryDb.getStats();
         const deletedTools = memoryDb.purgeOldToolOutputs(toolsDays);
         const deletedFacts = memoryDb.purgeOldFacts(factsDays);
+        const deletedSummaries = memoryDb.purgeOldCompactionSummaries(factsDays);
+        const deletedCompressed = memoryDb.purgeOldCompressedResults(factsDays);
         const statsAfter = memoryDb.getStats();
         
         const lines = [
@@ -157,9 +160,11 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           ``,
           `Tool outputs (> ${toolsDays} days): deleted ${deletedTools}`,
           `Session facts (> ${factsDays} days): deleted ${deletedFacts}`,
+          `Compaction summaries (> ${factsDays} days): deleted ${deletedSummaries}`,
+          `Compressed results (> ${factsDays} days): deleted ${deletedCompressed}`,
           ``,
-          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
-          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
+          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
+          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
         ];
         
         cmdCtx.ui.notify(lines.join("\n"), "info");
@@ -215,6 +220,30 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           for (const f of factResults) {
             const date = new Date(f.timestamp).toLocaleString();
             lines.push(`  [${f.fact_type}] ${f.content.slice(0, 80)} (${date})`);
+          }
+          lines.push(``);
+        }
+
+        const summaryResults = memoryDb.searchCompactionSummaries(query, 5);
+        if (summaryResults.length > 0) {
+          lines.push(`📦 Compaction summaries (${summaryResults.length}):`);
+          for (const s of summaryResults) {
+            const date = new Date(s.timestamp).toLocaleString();
+            const preview = s.summary.slice(0, 120).replace(/\n/g, ' ');
+            lines.push(`  [${s.reason}] (${date})`);
+            lines.push(`    ${preview}${s.summary.length > 120 ? '...' : ''}`);
+          }
+          lines.push(``);
+        }
+
+        // НОВОЕ: поиск по compressed_results
+        const compressedResults = memoryDb.searchCompressedResults(query, 5);
+        if (compressedResults.length > 0) {
+          lines.push(`🗜️ Compressed results (${compressedResults.length}):`);
+          for (const c of compressedResults) {
+            const date = new Date(c.timestamp).toLocaleString();
+            lines.push(`  [ID:${c.id}] ${c.original_hash.slice(0, 16)} (${date})`);
+            lines.push(`    ${c.compressed.slice(0, 80)}`);
           }
           lines.push(``);
         }
@@ -274,6 +303,63 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Content: ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`,
           "info"
         );
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // /memory-summaries [limit] — Показать summaries компакции
+  pi.registerCommand("memory-summaries", {
+    description: "Show compaction summaries: /memory-summaries [limit]",
+    handler: async (argStr, cmdCtx) => {
+      if (!memoryDb) {
+        cmdCtx.ui.notify("❌ Memory database not initialized", "error");
+        return;
+      }
+
+      const limit = argStr.trim() ? parseInt(argStr.trim(), 10) : 5;
+      const stats = memoryDb.getStats();
+
+      if (stats.compactionSummaries === 0) {
+        cmdCtx.ui.notify(
+          `📦 No compaction summaries saved yet.\n` +
+          `Compaction summaries are saved automatically when context is compacted.`,
+          "info"
+        );
+        return;
+      }
+
+      try {
+        const summaries = memoryDb.getCompactionSummaries(sessionMemory?.getSessionId() || "", limit);
+        
+        const lines = [
+          `📦 Compaction Summaries (${stats.compactionSummaries} total, showing ${summaries.length}):`,
+          ``,
+        ];
+
+        for (const s of summaries) {
+          const date = new Date(s.timestamp).toLocaleString();
+          const icon = {
+            manual: "🔧",
+            threshold: "📏",
+            overflow: "⚠️",
+          }[s.reason] || "📦";
+
+          const preview = s.summary.slice(0, 150).replace(/\n/g, ' ');
+          lines.push(`${icon} [${s.reason}] ${s.tokensBefore} tokens (${date})`);
+          lines.push(`  ${preview}${s.summary.length > 150 ? '...' : ''}`);
+          
+          if (s.detailed_summary) {
+            const detailedPreview = s.detailed_summary.slice(0, 100).replace(/\n/g, ' ');
+            lines.push(`  📋 Detailed: ${detailedPreview}${s.detailed_summary.length > 100 ? '...' : ''}`);
+          }
+          
+          lines.push(`  💡 Use ctx_search "id:${s.id}" to see full content`);
+          lines.push(``);
+        }
+
+        cmdCtx.ui.notify(lines.join("\n"), "info");
       } catch (err) {
         cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
       }

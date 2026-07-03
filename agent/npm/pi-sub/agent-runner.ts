@@ -35,6 +35,12 @@ export const SUBAGENT_TOOL_NAMES = {
 
 const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 
+export interface CompactionInfo {
+  reason: "manual" | "threshold" | "overflow";
+  tokensBefore: number;
+  summary?: string;
+}
+
 export function extensionCanonicalName(extPath: string): string {
   const base = basename(extPath);
   const name = base === "index.ts" || base === "index.js"
@@ -156,7 +162,11 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   onTurnEnd?: (turnCount: number) => void;
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-  onCompaction?: (info: { reason: "manual" | "threshold" | "overflow"; tokensBefore: number }) => void;
+  onCompaction?: (info: { 
+    reason: "manual" | "threshold" | "overflow"; 
+    tokensBefore: number;
+    summary?: string;  // ← ДОБАВЛЕНО
+  }) => void;
 }
 
 export interface RunResult {
@@ -502,8 +512,12 @@ export async function runAgent(
       });
     }
     if (event.type === "compaction_end" && !event.aborted && event.result) {
-      options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
-    }
+  options.onCompaction?.({ 
+    reason: event.reason, 
+    tokensBefore: event.result.tokensBefore,
+    summary: event.result.summary,  // ← ДОБАВЛЕНО
+  });
+}
   });
 
   const collector = collectResponseText(session);
@@ -555,7 +569,11 @@ export async function resumeAgent(
           });
         }
         if (event.type === "compaction_end" && !event.aborted && event.result) {
-          options.onCompaction?.({ reason: event.reason, tokensBefore: event.result.tokensBefore });
+          options.onCompaction?.({ 
+            reason: event.reason, 
+            tokensBefore: event.result.tokensBefore,
+            summary: event.result.summary,
+          });
         }
       })
     : () => {};

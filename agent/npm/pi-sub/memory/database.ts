@@ -9,7 +9,7 @@
  * Архитектура:
  * - Singleton (один экземпляр на проект)
  * - WAL mode для лучшей производительности при параллельном доступе
- * - FTS5 для полнотекстового поиска
+ * - FTS5 для полнотекстового поиска ПО ВСЕМ ТАБЛИЦАМ
  * - Автоматическая миграция схемы при изменениях
  * - Поиск корневого .pi вверх по дереву (как git ищет .git)
  */
@@ -19,7 +19,7 @@ import { mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 5;
 
 /** Путь к БД относительно корня проекта. */
 const DB_RELATIVE_PATH = ".pi/memory/unified.db";
@@ -54,19 +54,24 @@ export interface SessionFact {
 }
 
 export interface CompressedResult {
+  id: number;  // ← ДОБАВЛЕНО: surrogate key для FTS5
   original_hash: string;
   compressed: string;
   timestamp: number;
 }
 
+export interface CompactionSummary {
+  id: number;
+  session_id: string;
+  reason: "manual" | "threshold" | "overflow";
+  tokens_before: number;
+  summary: string;
+  detailed_summary: string;
+  timestamp: number;
+}
+
 /**
  * Найти корневую директорию проекта (аналог того, как git ищет .git).
- * Ищет вверх по дереву директорий, пока не найдёт .pi.
- * 
- * Примеры:
- * - /home/user/project/.pi/memory → /home/user/project
- * - /home/user/project/.pi/.pi/memory → /home/user/project (НЕ .pi)
- * - /home/user/project/src/file.ts → /home/user/project (если есть .pi)
  */
 function findProjectRoot(startDir: string): string {
   let current = resolve(startDir);
@@ -80,7 +85,6 @@ function findProjectRoot(startDir: string): string {
     current = dirname(current);
   }
   
-  // Если не нашли — используем стартовую директорию
   return startDir;
 }
 
@@ -89,26 +93,19 @@ export class MemoryDatabase {
   private static instance: MemoryDatabase | null = null;
 
   private constructor(dbFilePath: string) {
-    // Создаём директорию если её нет
     const dir = dirname(dbFilePath);
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true });
     }
 
-    // Инициализируем БД с WAL mode для лучшей производительности
     this.db = new Database(dbFilePath);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("synchronous = NORMAL");
     this.db.pragma("cache_size = -64000"); // 64MB кэш
 
-    // Инициализируем схему
     this.initSchema();
   }
 
-  /** 
-   * Singleton: получить экземпляр БД для проекта.
-   * Автоматически находит корневую директорию .pi (как git ищет .git).
-   */
   static getInstance(projectDir: string = process.cwd()): MemoryDatabase {
     if (!MemoryDatabase.instance) {
       const projectRoot = findProjectRoot(projectDir);
@@ -118,10 +115,6 @@ export class MemoryDatabase {
     return MemoryDatabase.instance;
   }
 
-  /** 
-   * Singleton: получить экземпляр БД по явному пути к файлу.
-   * Используется MCP сервером для работы с общей БД.
-   */
   static getInstanceWithPath(dbFilePath: string): MemoryDatabase {
     if (!MemoryDatabase.instance) {
       MemoryDatabase.instance = new MemoryDatabase(dbFilePath);
@@ -129,7 +122,6 @@ export class MemoryDatabase {
     return MemoryDatabase.instance;
   }
 
-  /** Сбросить singleton (для тестов). */
   static resetInstance(): void {
     if (MemoryDatabase.instance) {
       MemoryDatabase.instance.close();
@@ -137,9 +129,7 @@ export class MemoryDatabase {
     }
   }
 
-  /** Инициализация схемы БД. */
   private initSchema(): void {
-    // Таблица версий для миграций
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS schema_version (
         version INTEGER PRIMARY KEY
@@ -169,7 +159,6 @@ export class MemoryDatabase {
         CREATE INDEX IF NOT EXISTS idx_tool_outputs_tool 
           ON tool_outputs(tool_name);
 
-        -- FTS5 для поиска по выводам инструментов
         CREATE VIRTUAL TABLE IF NOT EXISTS tool_outputs_fts USING fts5(
           tool_name, args, output, summary,
           content='tool_outputs',
@@ -177,7 +166,6 @@ export class MemoryDatabase {
           tokenize='unicode61'
         );
 
-        -- Триггеры для синхронизации FTS5 с основной таблицей
         CREATE TRIGGER IF NOT EXISTS tool_outputs_ai AFTER INSERT ON tool_outputs BEGIN
           INSERT INTO tool_outputs_fts(rowid, tool_name, args, output, summary)
           VALUES (new.id, new.tool_name, new.args, new.output, new.summary);
@@ -212,7 +200,6 @@ export class MemoryDatabase {
         CREATE INDEX IF NOT EXISTS idx_subagent_results_status 
           ON subagent_results(status);
 
-        -- FTS5 для поиска по результатам субагентов
         CREATE VIRTUAL TABLE IF NOT EXISTS subagent_results_fts USING fts5(
           agent_type, description, result,
           content='subagent_results',
@@ -234,7 +221,6 @@ export class MemoryDatabase {
         CREATE INDEX IF NOT EXISTS idx_session_facts_type 
           ON session_facts(fact_type);
 
-        -- FTS5 для поиска по фактам
         CREATE VIRTUAL TABLE IF NOT EXISTS session_facts_fts USING fts5(
           fact_type, content,
           content='session_facts',
@@ -242,7 +228,6 @@ export class MemoryDatabase {
           tokenize='unicode61'
         );
 
-        -- Триггеры для session_facts FTS5
         CREATE TRIGGER IF NOT EXISTS session_facts_ai AFTER INSERT ON session_facts BEGIN
           INSERT INTO session_facts_fts(rowid, fact_type, content)
           VALUES (new.id, new.fact_type, new.content);
@@ -253,9 +238,10 @@ export class MemoryDatabase {
           VALUES ('delete', old.id, old.fact_type, old.content);
         END;
 
-        -- Кэш сжатых результатов (чтобы не сжимать одно и то же дважды)
+        -- Кэш сжатых результатов (теперь с FTS5!)
         CREATE TABLE IF NOT EXISTS compressed_results (
-          original_hash TEXT PRIMARY KEY,
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          original_hash TEXT NOT NULL UNIQUE,
           compressed TEXT NOT NULL,
           timestamp INTEGER NOT NULL
         );
@@ -263,22 +249,202 @@ export class MemoryDatabase {
         CREATE INDEX IF NOT EXISTS idx_compressed_results_timestamp 
           ON compressed_results(timestamp DESC);
 
-        -- Сохраняем версию схемы
+        -- FTS5 для поиска по сжатым результатам
+        CREATE VIRTUAL TABLE IF NOT EXISTS compressed_results_fts USING fts5(
+          original_hash, compressed,
+          content='compressed_results',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS compressed_results_ai AFTER INSERT ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
+          VALUES (new.id, new.original_hash, new.compressed);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compressed_results_ad AFTER DELETE ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
+          VALUES ('delete', old.id, old.original_hash, old.compressed);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compressed_results_au AFTER UPDATE ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
+          VALUES ('delete', old.id, old.original_hash, old.compressed);
+          INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
+          VALUES (new.id, new.original_hash, new.compressed);
+        END;
+
+        -- Summaries компакции
+        CREATE TABLE IF NOT EXISTS compaction_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          reason TEXT NOT NULL CHECK(reason IN ('manual', 'threshold', 'overflow')),
+          tokens_before INTEGER NOT NULL,
+          summary TEXT NOT NULL,
+          detailed_summary TEXT NOT NULL DEFAULT '',
+          timestamp INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_summaries_timestamp 
+          ON compaction_summaries(timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_summaries_session
+          ON compaction_summaries(session_id);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS compaction_summaries_fts USING fts5(
+          reason, summary, detailed_summary,
+          content='compaction_summaries',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_ai AFTER INSERT ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
+          VALUES (new.id, new.reason, new.summary, new.detailed_summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_ad AFTER DELETE ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
+          VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_au AFTER UPDATE ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
+          VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
+          INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
+          VALUES (new.id, new.reason, new.summary, new.detailed_summary);
+        END;
+
         INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION});
       `);
     } else if (currentVersion.version < SCHEMA_VERSION) {
-      // TODO: Миграции для будущих версий
-      // this.migrate(currentVersion.version);
-      this.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
+      this.migrate(currentVersion.version);
     }
   }
 
-  /** Закрыть соединение с БД. */
-  close(): void {
-    this.db.close();
+  private migrate(fromVersion: number): void {
+    console.log(`[pi-sub] Migrating schema from v${fromVersion} to v${SCHEMA_VERSION}`);
+
+    if (fromVersion < 2) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS compaction_summaries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          reason TEXT NOT NULL CHECK(reason IN ('manual', 'threshold', 'overflow')),
+          tokens_before INTEGER NOT NULL,
+          summary TEXT NOT NULL,
+          timestamp INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_summaries_timestamp 
+          ON compaction_summaries(timestamp DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_compaction_summaries_session 
+          ON compaction_summaries(session_id);
+      `);
+    }
+
+    if (fromVersion < 3) {
+      const columns = this.db.prepare("PRAGMA table_info(compaction_summaries)").all() as Array<{ name: string }>;
+      const hasDetailedSummary = columns.some(c => c.name === "detailed_summary");
+      
+      if (!hasDetailedSummary) {
+        this.db.exec(`
+          ALTER TABLE compaction_summaries ADD COLUMN detailed_summary TEXT NOT NULL DEFAULT ''
+        `);
+      }
+    }
+
+    if (fromVersion < 4) {
+      this.db.exec(`
+        DROP TABLE IF EXISTS compaction_summaries_fts
+      `);
+      this.db.exec(`
+        CREATE VIRTUAL TABLE IF NOT EXISTS compaction_summaries_fts USING fts5(
+          reason, summary, detailed_summary,
+          content='compaction_summaries',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_ai AFTER INSERT ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
+          VALUES (new.id, new.reason, new.summary, new.detailed_summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_ad AFTER DELETE ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
+          VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compaction_summaries_au AFTER UPDATE ON compaction_summaries BEGIN
+          INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
+          VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
+          INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
+          VALUES (new.id, new.reason, new.summary, new.detailed_summary);
+        END;
+      `);
+    }
+
+    if (fromVersion < 5) {
+      // v4 → v5: Добавляем FTS5 для compressed_results
+      console.log(`[pi-sub] Migrating to v5: Adding FTS5 for compressed_results`);
+      
+      this.db.exec(`
+        -- Создаём новую таблицу с id
+        CREATE TABLE IF NOT EXISTS compressed_results_new (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          original_hash TEXT NOT NULL UNIQUE,
+          compressed TEXT NOT NULL,
+          timestamp INTEGER NOT NULL
+        );
+
+        -- Копируем данные из старой таблицы
+        INSERT INTO compressed_results_new (original_hash, compressed, timestamp)
+        SELECT original_hash, compressed, timestamp FROM compressed_results;
+
+        -- Удаляем старую таблицу
+        DROP TABLE compressed_results;
+
+        -- Переименовываем новую таблицу
+        ALTER TABLE compressed_results_new RENAME TO compressed_results;
+
+        -- Создаём индекс
+        CREATE INDEX IF NOT EXISTS idx_compressed_results_timestamp 
+          ON compressed_results(timestamp DESC);
+
+        -- Создаём FTS5 индекс
+        CREATE VIRTUAL TABLE IF NOT EXISTS compressed_results_fts USING fts5(
+          original_hash, compressed,
+          content='compressed_results',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        -- Создаём триггеры
+        CREATE TRIGGER IF NOT EXISTS compressed_results_ai AFTER INSERT ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
+          VALUES (new.id, new.original_hash, new.compressed);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compressed_results_ad AFTER DELETE ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
+          VALUES ('delete', old.id, old.original_hash, old.compressed);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS compressed_results_au AFTER UPDATE ON compressed_results BEGIN
+          INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
+          VALUES ('delete', old.id, old.original_hash, old.compressed);
+          INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
+          VALUES (new.id, new.original_hash, new.compressed);
+        END;
+      `);
+    }
+
+    this.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
+    console.log(`[pi-sub] Schema migrated to v${SCHEMA_VERSION}`);
   }
 
-  /** Получить raw Database для продвинутых операций. */
   getRaw(): Database.Database {
     return this.db;
   }
@@ -287,7 +453,6 @@ export class MemoryDatabase {
   // Tool Outputs
   // =========================================================================
 
-  /** Сохранить перехваченный вывод инструмента. */
   saveToolOutput(data: {
     toolName: string;
     args: string;
@@ -311,14 +476,12 @@ export class MemoryDatabase {
     return Number(result.lastInsertRowid);
   }
 
-  /** Получить полный вывод инструмента по ID. */
   getToolOutput(id: number): ToolOutput | undefined {
     return this.db.prepare(
       "SELECT * FROM tool_outputs WHERE id = ?"
     ).get(id) as ToolOutput | undefined;
   }
 
-  /** Поиск по выводам инструментов через FTS5. */
   searchToolOutputs(query: string, limit: number = 10): ToolOutput[] {
     return this.db.prepare(`
       SELECT t.* FROM tool_outputs t
@@ -337,7 +500,6 @@ export class MemoryDatabase {
     `).all(limit) as ToolOutput[];
   }
 
-  /** Удалить старые выводы инструментов (старше N дней). */
   purgeOldToolOutputs(daysOld: number = 7): number {
     const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
     const result = this.db.prepare(
@@ -350,7 +512,6 @@ export class MemoryDatabase {
   // Subagent Results
   // =========================================================================
 
-  /** Сохранить результат субагента. */
   saveSubagentResult(data: {
     id: string;
     agentType: string;
@@ -376,14 +537,12 @@ export class MemoryDatabase {
     );
   }
 
-  /** Получить результат субагента по ID. */
   getSubagentResult(id: string): SubagentResult | undefined {
     return this.db.prepare(
       "SELECT * FROM subagent_results WHERE id = ?"
     ).get(id) as SubagentResult | undefined;
   }
 
-  /** Поиск по результатам субагентов через FTS5. */
   searchSubagentResults(query: string, limit: number = 10): SubagentResult[] {
     return this.db.prepare(`
       SELECT s.* FROM subagent_results s
@@ -398,7 +557,6 @@ export class MemoryDatabase {
   // Session Facts (долговременная память)
   // =========================================================================
 
-  /** Сохранить факт из сессии. */
   saveFact(data: {
     sessionId: string;
     factType: "decision" | "lesson" | "preference" | "architecture" | "api";
@@ -419,7 +577,12 @@ export class MemoryDatabase {
     return Number(result.lastInsertRowid);
   }
 
-  /** Поиск по фактам через FTS5. */
+  getFactById(id: number): SessionFact | undefined {
+    return this.db.prepare(
+      "SELECT * FROM session_facts WHERE id = ?"
+    ).get(id) as SessionFact | undefined;
+  }
+
   searchFacts(query: string, limit: number = 10): SessionFact[] {
     return this.db.prepare(`
       SELECT f.* FROM session_facts f
@@ -430,7 +593,6 @@ export class MemoryDatabase {
     `).all(query, limit) as SessionFact[];
   }
 
-  /** Поиск по фактам через LIKE (для частичных совпадений). */
   searchFactsLike(pattern: string, limit: number = 10): SessionFact[] {
     return this.db.prepare(`
       SELECT * FROM session_facts
@@ -440,7 +602,6 @@ export class MemoryDatabase {
     `).all(pattern, limit) as SessionFact[];
   }
   
-  /** Получить последние N фактов. */
   getRecentFacts(limit: number = 20): SessionFact[] {
     return this.db.prepare(`
       SELECT * FROM session_facts
@@ -449,7 +610,6 @@ export class MemoryDatabase {
     `).all(limit) as SessionFact[];
   }
 
-  /** Удалить старые факты (старше N дней). */
   purgeOldFacts(daysOld: number = 30): number {
     const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
     const result = this.db.prepare(
@@ -459,10 +619,9 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
-  // Compressed Results Cache
+  // Compressed Results Cache (теперь с FTS5!)
   // =========================================================================
 
-  /** Получить сжатый результат из кэша (по хэшу оригинала). */
   getCompressedResult(originalHash: string): string | null {
     const row = this.db.prepare(
       "SELECT compressed FROM compressed_results WHERE original_hash = ?"
@@ -470,24 +629,136 @@ export class MemoryDatabase {
     return row?.compressed ?? null;
   }
 
-  /** Сохранить сжатый результат в кэш. */
-  saveCompressedResult(originalHash: string, compressed: string): void {
-    this.db.prepare(`
-      INSERT OR REPLACE INTO compressed_results (original_hash, compressed, timestamp)
+  saveCompressedResult(originalHash: string, compressed: string): number {
+    // Проверяем существует ли уже
+    const existing = this.db.prepare(
+      "SELECT id FROM compressed_results WHERE original_hash = ?"
+    ).get(originalHash) as { id: number } | undefined;
+    
+    if (existing) {
+      // Обновляем существующую запись
+      this.db.prepare(`
+        UPDATE compressed_results 
+        SET compressed = ?, timestamp = ?
+        WHERE original_hash = ?
+      `).run(compressed, Date.now(), originalHash);
+      return existing.id;
+    }
+    
+    // Создаём новую запись
+    const stmt = this.db.prepare(`
+      INSERT INTO compressed_results (original_hash, compressed, timestamp)
       VALUES (?, ?, ?)
-    `).run(originalHash, compressed, Date.now());
+    `);
+    
+    const result = stmt.run(originalHash, compressed, Date.now());
+    return Number(result.lastInsertRowid);
+  }
+
+  getCompressedResultById(id: number): CompressedResult | undefined {
+    return this.db.prepare(
+      "SELECT * FROM compressed_results WHERE id = ?"
+    ).get(id) as CompressedResult | undefined;
+  }
+
+  searchCompressedResults(query: string, limit: number = 10): CompressedResult[] {
+    return this.db.prepare(`
+      SELECT c.* FROM compressed_results c
+      JOIN compressed_results_fts f ON c.id = f.rowid
+      WHERE compressed_results_fts MATCH ?
+      ORDER BY c.timestamp DESC
+      LIMIT ?
+    `).all(query, limit) as CompressedResult[];
+  }
+
+  purgeOldCompressedResults(daysOld: number = 30): number {
+    const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+    const result = this.db.prepare(
+      "DELETE FROM compressed_results WHERE timestamp < ?"
+    ).run(cutoff);
+    return result.changes;
+  }
+
+  // =========================================================================
+  // Compaction Summaries
+  // =========================================================================
+
+  saveCompactionSummary(data: {
+    sessionId: string;
+    reason: "manual" | "threshold" | "overflow";
+    tokensBefore: number;
+    summary: string;
+    detailedSummary?: string;
+  }): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO compaction_summaries 
+      (session_id, reason, tokens_before, summary, detailed_summary, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      data.sessionId,
+      data.reason,
+      data.tokensBefore,
+      data.summary,
+      data.detailedSummary || "",
+      Date.now()
+    );
+
+    return Number(result.lastInsertRowid);
+  }
+
+  getCompactionSummaryById(id: number): CompactionSummary | undefined {
+    return this.db.prepare(
+      "SELECT * FROM compaction_summaries WHERE id = ?"
+    ).get(id) as CompactionSummary | undefined;
+  }
+
+  getCompactionSummaries(sessionId: string, limit: number = 10): CompactionSummary[] {
+    if (!sessionId) {
+      return this.db.prepare(`
+        SELECT * FROM compaction_summaries
+        ORDER BY timestamp DESC
+        LIMIT ?
+      `).all(limit) as CompactionSummary[];
+    }
+    
+    return this.db.prepare(`
+      SELECT * FROM compaction_summaries
+      WHERE session_id = ?
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(sessionId, limit) as CompactionSummary[];
+  }
+
+  searchCompactionSummaries(query: string, limit: number = 10): CompactionSummary[] {
+    return this.db.prepare(`
+      SELECT c.* FROM compaction_summaries c
+      JOIN compaction_summaries_fts f ON c.id = f.rowid
+      WHERE compaction_summaries_fts MATCH ?
+      ORDER BY c.timestamp DESC
+      LIMIT ?
+    `).all(query, limit) as CompactionSummary[];
+  }
+
+  purgeOldCompactionSummaries(daysOld: number = 30): number {
+    const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+    const result = this.db.prepare(
+      "DELETE FROM compaction_summaries WHERE timestamp < ?"
+    ).run(cutoff);
+    return result.changes;
   }
 
   // =========================================================================
   // Статистика
   // =========================================================================
 
-  /** Получить статистику по БД. */
   getStats(): {
     toolOutputs: number;
     subagentResults: number;
     sessionFacts: number;
     compressedResults: number;
+    compactionSummaries: number;
     dbSizeMb: number;
   } {
     const toolOutputs = (this.db.prepare(
@@ -506,11 +777,21 @@ export class MemoryDatabase {
       "SELECT COUNT(*) as count FROM compressed_results"
     ).get() as { count: number }).count;
 
-    // Размер БД в MB
+    const compactionSummaries = (this.db.prepare(
+      "SELECT COUNT(*) as count FROM compaction_summaries"
+    ).get() as { count: number }).count;
+
     const pageInfo = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
     const pageSize = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
     const dbSizeMb = (pageInfo.page_count * pageSize.page_size) / (1024 * 1024);
 
-    return { toolOutputs, subagentResults, sessionFacts, compressedResults, dbSizeMb };
+    return { 
+      toolOutputs, 
+      subagentResults, 
+      sessionFacts, 
+      compressedResults,
+      compactionSummaries, 
+      dbSizeMb 
+    };
   }
 }
