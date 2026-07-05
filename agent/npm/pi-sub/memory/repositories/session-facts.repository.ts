@@ -137,13 +137,14 @@ export class SessionFactsRepository {
   /**
    * Получить все факты для конкретного проекта (для консолидации).
    */
-  getByProject(projectPath: string): SessionFact[] {
-    return this.db.prepare(`
-      SELECT * FROM session_facts
-      WHERE project_path = ?
-      ORDER BY timestamp DESC
-    `).all(projectPath) as SessionFact[];
-  }
+getByProject(projectPath: string, limit: number = 10000): SessionFact[] {
+  return this.db.prepare(`
+    SELECT * FROM session_facts
+    WHERE project_path = ?
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `).all(projectPath, limit) as SessionFact[];
+}
 
   /**
    * Получить все уникальные project_path (для отладки).

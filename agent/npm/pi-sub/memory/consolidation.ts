@@ -122,9 +122,9 @@ export function consolidateMemory(
   }
   
   // v11: Получаем факты только для текущего проекта
-  const facts = projectPath 
-    ? db.getFactsByProject(projectPath).slice(0, maxRecords)
-    : db.getRecentFacts(maxRecords);
+ const facts = projectPath 
+  ? db.getFactsByProject(projectPath, maxRecords)  // ← передаём лимит напрямую
+  : db.getRecentFacts(maxRecords);
   
   if (facts.length < 100) {
     console.log(`[pi-sub] 🔄 Not enough records to consolidate (${facts.length} < 100)`);

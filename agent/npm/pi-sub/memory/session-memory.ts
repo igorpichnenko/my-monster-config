@@ -66,12 +66,13 @@ export class SessionMemory {
   }
   
   /** v11: Установить путь к текущему проекту */
-  setProjectPath(projectPath: string): void {
-    if (this.currentProjectPath !== projectPath) {
-      this.currentProjectPath = projectPath;
-      logger.info(`Session memory: project path ${projectPath}`);
-    }
+setProjectPath(projectPath: string): void {
+  if (this.currentProjectPath !== projectPath) {
+    this.savedFactHashes.clear();  // ← ДОБАВИТЬ
+    this.currentProjectPath = projectPath;
+    logger.info(`Session memory: project path ${projectPath}`);
   }
+}
   
   /** v11: Получить путь к текущему проекту */
   getProjectPath(): string | null {

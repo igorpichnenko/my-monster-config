@@ -212,9 +212,9 @@ export class MemoryDatabase {
     return this.sessionFacts.getRecent(limit, projectPath);
   }
 
-  getFactsByProject(projectPath: string) {
-    return this.sessionFacts.getByProject(projectPath);
-  }
+getFactsByProject(projectPath: string, limit: number = 10000) {
+  return this.sessionFacts.getByProject(projectPath, limit);
+}
 
   purgeOldFacts(daysOld: number = 30) {
     return this.sessionFacts.purgeOld(daysOld);
