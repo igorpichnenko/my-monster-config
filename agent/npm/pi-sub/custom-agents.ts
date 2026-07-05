@@ -1,5 +1,8 @@
 /**
  * custom-agents.ts — Load user-defined agents from project (.pi/agents/) and global ($PI_CODING_AGENT_DIR/agents/) locations.
+ * 
+ * v13: Добавлена обработка ошибок parseFrontmatter — если .md файл содержит
+ *      невалидный YAML, он пропускается с логированием ошибки, а не ломает загрузку.
  */
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -34,13 +37,45 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
     let content: string;
     try {
       content = readFileSync(join(dir, file), "utf-8");
-    } catch {
+    } catch (err) {
+      console.error(`[pi-sub] ⚠️ Failed to read agent file ${file}:`, err);
       continue;
     }
 
-    const { frontmatter: fm, body } = parseFrontmatter<Record<string, unknown>>(content);
+    // v13: Обработка ошибок parseFrontmatter
+    let fm: Record<string, unknown>;
+    let body: string;
+    try {
+      const parsed = parseFrontmatter<Record<string, unknown>>(content);
+      fm = parsed.frontmatter;
+      body = parsed.body;
+    } catch (err) {
+      console.error(
+        `[pi-sub] ⚠️ Failed to parse frontmatter in ${file}: ${err instanceof Error ? err.message : String(err)}. Skipping.`
+      );
+      continue;
+    }
 
-    const { builtinToolNames, extSelectors } = parseToolsField(fm.tools);
+    // Валидация: system prompt не должен быть пустым
+    const systemPrompt = body.trim();
+    if (!systemPrompt) {
+      console.warn(`[pi-sub] ⚠️ Agent ${name} in ${source} has empty system prompt. Skipping.`);
+      continue;
+    }
+
+    let builtinToolNames: string[];
+    let extSelectors: string[] | undefined;
+    try {
+      const parsed = parseToolsField(fm.tools);
+      builtinToolNames = parsed.builtinToolNames;
+      extSelectors = parsed.extSelectors;
+    } catch (err) {
+      console.error(
+        `[pi-sub] ⚠️ Failed to parse tools field in ${file}: ${err instanceof Error ? err.message : String(err)}. Using defaults.`
+      );
+      builtinToolNames = [...BUILTIN_TOOL_NAMES];
+      extSelectors = undefined;
+    }
 
     agents.set(name, {
       name,
@@ -57,7 +92,7 @@ function loadFromDir(dir: string, agents: Map<string, AgentConfig>, source: "pro
       maxTurns: nonNegativeInt(fm.max_turns),
       persistSession: fm.persist_session != null ? fm.persist_session === true : undefined,
       sessionDir: str(fm.session_dir),
-      systemPrompt: body.trim(),
+      systemPrompt,
       promptMode: fm.prompt_mode === "append" ? "append" : "replace",
       inheritContext: fm.inherit_context != null ? fm.inherit_context === true : undefined,
       runInBackground: fm.run_in_background != null ? fm.run_in_background === true : undefined,

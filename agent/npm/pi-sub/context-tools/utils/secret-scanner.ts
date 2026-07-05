@@ -6,6 +6,13 @@
  * - Токенов (Bearer, JWT)
  * - SSH ключей
  * - Паролей
+ * 
+ * v12: Исправлен баг с indexOf — теперь корректно определяет позицию
+ *      каждого вхождения, даже если секрет встречается несколько раз.
+ * v13: Улучшен high_entropy паттерн:
+ *      - Увеличен порог с 40 до 64 символов (git hashes = 40 символов)
+ *      - Добавлен whitelist для известных не-секретных форматов
+ *      - Исключены строки, похожие на git commit hashes
  */
 
 export interface ScanResult {
@@ -15,6 +22,30 @@ export interface ScanResult {
     pattern: string;
     location: string;
   }>;
+}
+
+/**
+ * v13: Whitelist для строк, которые НЕ являются секретами,
+ * но могут попасть под high_entropy паттерн.
+ */
+const HIGH_ENTROPY_WHITELIST = [
+  // Git commit hashes (40 hex символов)
+  /^[a-f0-9]{40}$/i,
+  // SHA-256 hashes (64 hex символа, но часто встречаются в логах)
+  /^[a-f0-9]{64}$/i,
+  // UUID v4 (36 символов с дефисами)
+  /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i,
+  // Base64 padding (часто в логах)
+  /^={2,}$/,
+  // Пустые или повторяющиеся символы
+  /^(.)\1+$/,
+];
+
+/**
+ * Проверяет, является ли строка известным не-секретным форматом.
+ */
+function isWhitelisted(value: string): boolean {
+  return HIGH_ENTROPY_WHITELIST.some(pattern => pattern.test(value));
 }
 
 const SECRET_PATTERNS = [
@@ -83,34 +114,54 @@ const SECRET_PATTERNS = [
     pattern: /(?:sk|pk)_(test|live)_[0-9a-zA-Z]{24,}/g,
     description: 'Stripe API key',
   },
-  // Generic secrets (high entropy strings)
+  // v13: Generic secrets (high entropy strings) — увеличен порог до 64
+  // Git commit hashes (40 символов) теперь игнорируются через whitelist
   {
     type: 'high_entropy',
-    pattern: /["'][a-zA-Z0-9]{40,}["']/g,
+    pattern: /["']([a-zA-Z0-9]{64,})["']/g,
     description: 'High entropy string (possible secret)',
+    isHighEntropy: true,  // ← флаг для whitelist проверки
   },
 ];
 
 /**
  * Сканирует текст на наличие секретов.
+ * 
+ * v12: Использует matchAll() для корректного определения позиции
+ *      каждого вхождения, даже при дубликатах.
+ * v13: Добавлена whitelist проверка для high_entropy паттерна.
  */
 export function scanForSecrets(text: string): ScanResult {
   const secrets: ScanResult['secrets'] = [];
   
-  for (const { type, pattern, description } of SECRET_PATTERNS) {
-    const matches = text.match(pattern);
-    if (matches) {
-      for (const match of matches) {
-        // Находим позицию в тексте
-        const index = text.indexOf(match);
-        const location = `position ${index}`;
-        
-        secrets.push({
-          type,
-          pattern: description,
-          location,
-        });
+  for (const { type, pattern, description, isHighEntropy } of SECRET_PATTERNS) {
+    // Создаём новый RegExp с флагом g, чтобы matchAll работал
+    const globalPattern = new RegExp(
+      pattern.source, 
+      pattern.flags.includes('g') ? pattern.flags : pattern.flags + 'g'
+    );
+    
+    const matches = Array.from(text.matchAll(globalPattern));
+    
+    for (const match of matches) {
+      // v13: Для high_entropy проверяем whitelist
+      if (isHighEntropy) {
+        // match[1] — это содержимое в кавычках (первая capture group)
+        const secretValue = match[1] || match[0];
+        if (isWhitelisted(secretValue)) {
+          continue;  // Пропускаем — это git hash или другой известный формат
+        }
       }
+      
+      // match.index — точная позиция вхождения
+      const index = match.index ?? -1;
+      const location = index >= 0 ? `position ${index}` : 'unknown';
+      
+      secrets.push({
+        type,
+        pattern: description,
+        location,
+      });
     }
   }
   
@@ -122,12 +173,24 @@ export function scanForSecrets(text: string): ScanResult {
 
 /**
  * Маскирует секрет в тексте (заменяет на [REDACTED]).
+ * 
+ * v13: Также учитывает whitelist для high_entropy.
  */
 export function redactSecret(text: string): string {
   let redacted = text;
   
-  for (const { pattern } of SECRET_PATTERNS) {
-    redacted = redacted.replace(pattern, '[REDACTED]');
+  for (const { pattern, isHighEntropy } of SECRET_PATTERNS) {
+    if (isHighEntropy) {
+      // Для high_entropy используем callback, чтобы проверить whitelist
+      redacted = redacted.replace(pattern, (match, secretValue) => {
+        if (isWhitelisted(secretValue)) {
+          return match;  // Не заменяем — это не секрет
+        }
+        return match.replace(secretValue, '[REDACTED]');
+      });
+    } else {
+      redacted = redacted.replace(pattern, '[REDACTED]');
+    }
   }
   
   return redacted;

@@ -3,6 +3,7 @@
  * 
  * v9: Исправлен search() — экранирование специальных символов FTS5
  * v9.3: save() возвращает number, использует ON CONFLICT DO UPDATE для сохранения timestamp
+ * v12: Унифицирован escapeFts5Query с ctx-search.ts (экранирует все спецсимволы FTS5)
  */
 
 import type Database from "better-sqlite3";
@@ -22,17 +23,24 @@ export interface SubagentResult {
 /**
  * Экранирует запрос для FTS5 MATCH.
  * 
- * Проблемы, которые решает:
- * 1. Дефис в словах (general-purpose) — FTS5 интерпретирует как NOT
- * 2. Кавычки — ломают синтаксис MATCH
- * 3. Специальные символы (*, +, -, NOT, AND, OR)
+ * v12: Унифицирован с ctx-search.ts — теперь экранирует ВСЕ спецсимволы FTS5,
+ *      а не только двойные кавычки.
  * 
- * Решение: оборачиваем запрос в двойные кавычки, что заставляет FTS5
- * искать фразу целиком, а не разбирать её на операторы.
+ * Спецсимволы FTS5: + - * ~ ( ) | & { } ^ "
+ * Решение: заменяем их на пробелы и оборачиваем в кавычки для поиска фразы целиком.
  */
 function escapeFts5Query(query: string): string {
-  // Убираем двойные кавычки из запроса
-  const cleaned = query.replace(/"/g, '');
+  // Экранируем все спецсимволы FTS5
+  const cleaned = query
+    .replace(/"/g, '')                    // убираем кавычки
+    .replace(/[+\-*~()|&{}^]/g, ' ')     // заменяем спецсимволы на пробелы
+    .replace(/\s+/g, ' ')                 // убираем множественные пробелы
+    .trim();
+  
+  // Если после очистки ничего не осталось — возвращаем пустой запрос
+  if (!cleaned) {
+    return '""';
+  }
   
   // Оборачиваем в кавычки для поиска фразы целиком
   return `"${cleaned}"`;
@@ -111,8 +119,7 @@ export class SubagentResultsRepository {
   }
 
   search(query: string, limit: number = 10): SubagentResult[] {
-    // v9: Экранируем запрос для корректной работы FTS5 MATCH
-    // Это решает проблему с дефисами (general-purpose) и спецсимволами
+    // v12: Унифицированное экранирование — то же, что в ctx-search.ts
     const escapedQuery = escapeFts5Query(query);
     
     return this.db.prepare(`
