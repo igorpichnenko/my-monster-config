@@ -15,7 +15,14 @@
 | **Зацикливание агентов** | Loop-police детектит повторы | ✅ Экономия токенов |
 | **Огромный system prompt** | Кастомный промпт (~300 токенов) | ✅ Быстрый первый ответ |
 | **Потеря данных субагентов** | Compact сохраняется для всех агентов | ✅ Полная история работы |
+| **Дубликаты в БД** | Deduplication через SHA-256 хэш | ✅ Экономия места в БД |
+| **Низкое качество поиска** | Priority System (1-10) | ✅ Важные результаты выше |
+| **Повторение ошибок** | Failure Memory | ✅ Модель учится на ошибках |
+| **Утечка секретов** | Secret Scanning (API keys, tokens) | ✅ Автоматическая маскировка |
+| **Пропуск важных фактов** | Background Learning (каждые 10 ходов) | ✅ Проактивное сохранение |
+| **Игнорирование исправлений** | Correction Detection | ✅ Модель запоминает правки |
 
+---
 
 ## 🛠 Инструменты
 
@@ -31,6 +38,8 @@ bash({ command: "npm test", timeout: 30000 })
 
 - Если вывод > 5000 символов → сохраняется в БД
 - Возвращает summary + ID для поиска
+- **Deduplication**: если вывод уже сохранён — возвращает существующий ID (♻️)
+- **Priority**: вычисляется автоматически (git → 🟠, ошибки → 🔴, ls → 🟢)
 
 #### `read`
 
@@ -40,6 +49,8 @@ read({ path: "src/index.ts", offset: 0, limit: 100 })
 
 - Поддержка offset/limit для больших файлов
 - Авто-сохранение в БД
+- **Deduplication**: если файл уже сохранён — возвращает существующий ID (♻️)
+- **Priority**: файлы с ошибками получают повышенный приоритет
 
 #### `grep`
 
@@ -49,6 +60,7 @@ grep({ pattern: "TODO", path: "src/", options: "-rn" })
 
 - Автоматически исключает `.git`
 - Использует `rg` если установлен
+- **Priority**: поиск с ошибками → 🔴, без ошибок → 🟢
 
 #### `find`
 
@@ -58,12 +70,15 @@ find({ pattern: "*.ts", path: ".", limit: 1000 })
 
 - Автоматически исключает `.git`
 - Использует `fdfind` если установлен
+- **Priority**: поиск с ошибками → 🔴, без ошибок → 🟢
 
 #### `ls`
 
 ```typescript
 ls({ path: ".", options: "-la" })
 ```
+
+- **Priority**: обычно 🟢 (низкий приоритет)
 
 #### `ctx_search` (новый инструмент)
 
@@ -76,6 +91,8 @@ ctx_search({ query: "id:42" })  # полный вывод по ID
 - Поиск по tool_name, args, output, summary
 - Специальный запрос `id:<n>` для получения полного вывода
 - Группировка keywords по компакциям (одна компакция = одна строка)
+- **Priority-based sorting**: результаты tool_outputs сортируются по приоритету
+- **Priority emoji**: 🔴 критический, 🟠 высокий, 🟡 средний, 🟢 низкий
 
 ### Встроенные инструменты (pi-coding-agent)
 
@@ -136,13 +153,15 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 
 | Команда | Описание | Параметры |
 |---------|----------|-----------|
-| `/memory-stats` | Статистика БД | - |
+| `/memory-stats` | Статистика БД (включая priority stats) | - |
 | `/memory-search` | Поиск по всем данным | `<query>` |
 | `/memory-add` | Добавить факт вручную | `<type> <content>` |
 | `/memory-purge` | Очистить старые данные | `[tools=N] [facts=N]` |
 | `/memory-test` | Тестовые операции с БД | - |
 | `/memory-summaries` | Показать summaries компакции | `[limit]` |
 | `/memory-keywords` | Показать ключевые слова компакций | `[query]` |
+| `/memory-failures` | Показать память о неудачах | `[query]` |
+| `/memory-consolidate` | Консолидация похожих записей | `[--dry-run] [threshold=0.7]` |
 
 **Типы фактов:**
 
@@ -160,6 +179,9 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 /memory-purge tools=7 facts=30
 /memory-keywords WAL              # Поиск по ключевым словам
 /memory-keywords                  # Показать последние ключевые слова
+/memory-failures ENOENT           # Поиск по неудачам
+/memory-consolidate --dry-run     # Тест консолидации
+/memory-consolidate threshold=0.8 # Консолидация с порогом 0.8
 ```
 
 ### Другие команды
@@ -213,12 +235,14 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 
 | Событие | Действие |
 |---------|----------|
-| `session_start` | Инициализация UI, set session ID |
+| `session_start` | Инициализация UI, set session ID, auto-consolidation если > 1000 записей |
 | `session_before_switch` | Очистка завершённых агентов |
 | `session_shutdown` | Abort всех, dispose |
 | `tool_execution_start` | Обновление UI виджета |
 | `tool_result` | Обрезка вывода до 5KB |
-| `session_before_compact` | Извлечение фактов (только для main agent) |
+| `turn_end` | **Background Learning**: каждые 10 ходов извлекает факты |
+| `message_update` | **Correction Detection**: детекция исправлений пользователя |
+| `session_before_compact` | Извлечение фактов + неудач (только для main agent) |
 | `before_agent_start` | Кастомный system prompt с memory policy |
 
 **Примечание:** Генерация `detailed_summary` и `meta` происходит в `agent-runner.ts` при событии `compaction_end` для **всех агентов** (main + subagents). Это позволяет сохранять полную историю работы субагентов.
@@ -275,6 +299,8 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 │
 ├── tool_outputs
 │   ├── id, tool_name, args, output, summary, timestamp, size
+│   ├── content_hash (SHA-256 для deduplication)
+│   ├── priority (1-10 для сортировки)
 │   └── FTS5 index (tool_outputs_fts)
 │
 ├── subagent_results
@@ -293,10 +319,14 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 │   ├── id, original_hash, compressed, timestamp
 │   └── FTS5 index (compressed_results_fts)
 │
-└── compaction_keywords (нормализованные ключевые слова)
-    ├── id, compaction_id, keyword, category, timestamp
-    ├── category: file | decision | lesson
-    └── FTS5 index (compaction_keywords_fts)
+├── compaction_keywords (нормализованные ключевые слова)
+│   ├── id, compaction_id, keyword, category, timestamp
+│   ├── category: file | decision | lesson
+│   └── FTS5 index (compaction_keywords_fts)
+│
+└── failures (память о неудачах)
+    ├── id, session_id, approach, error, reason, solution, context, timestamp
+    └── FTS5 index (failures_fts)
 ```
 
 ### Как модель получает данные в новой сессии
@@ -341,15 +371,19 @@ ctx_search({ query: "id:42" })
 
 // Поиск по ключевым словам компакций
 ctx_search({ query: "WAL mode" })
+
+// Поиск по неудачам
+ctx_search({ query: "ENOENT" })
 ```
 
 **Что ищет:** По **ВСЕМ** таблицам с FTS5:
-- `tool_outputs` — прошлые выводы bash/read/grep/find/ls
+- `tool_outputs` — прошлые выводы bash/read/grep/find/ls (с приоритетом)
 - `subagent_results` — результаты прошлых субагентов
 - `session_facts` — извлечённые факты
 - `compaction_summaries` — summaries компакций (main + subagents)
 - `compressed_results` — сжатые результаты
 - `compaction_keywords` — нормализованные ключевые слова (main + subagents)
+- `failures` — память о неудачах
 
 ### Поиск корневого `.pi`
 
@@ -430,6 +464,178 @@ ctx_search "id:42"
 /memory-keywords research
 ```
 
+### Deduplication (Phase 12)
+
+**Принцип:** Перед сохранением `tool_output` вычисляется SHA-256 хэш от `output`. Если такой хэш уже есть — возвращается существующий ID и summary, не создаётся дубликат.
+
+**Пример:**
+```
+Сессия 1: bash "ls -la" → output: "total 123..." → hash: abc123 → ID: 1
+Сессия 2: bash "ls -la" → output: "total 123..." → hash: abc123 → возвращаем ID: 1 (дубликат!)
+```
+
+**Экономия:** При повторных вызовах одних и тех же команд (например, `git status`, `npm test`) БД не разрастается.
+
+**Индикаторы:**
+- 💾 — новый вывод сохранён
+- ♻️ — вывод уже сохранён (дубликат)
+
+### Priority System (Phase 12)
+
+**Принцип:** Каждому `tool_output` присваивается приоритет (1-10). При поиске результаты сортируются по приоритету.
+
+**Правила:**
+```
+Ошибки (error/failed)      → +3 (priority 8)
+Git команды                → +2 (priority 7)
+Тесты (jest/pytest)        → +2 (priority 7)
+npm install/yarn add       → +2 (priority 7)
+Docker                     → +1 (priority 6)
+Сборка (build/compile)     → +1 (priority 6)
+ls/cat/echo                → -1 (priority 4)
+Обычные команды            → 0  (priority 5)
+```
+
+**Эмодзи приоритета:**
+- 🔴 (8-10) — критический
+- 🟠 (6-7) — высокий
+- 🟡 (4-5) — средний
+- 🟢 (1-3) — низкий
+
+**Пример:**
+```
+ctx_search "database" →
+  1. [priority 8] 🔴 ❌ Error: connection to database failed
+  2. [priority 7] 🟠 🧪 jest: 47 passed, 3 failed
+  3. [priority 5] 🟡 📄 file.ts: database connection code
+```
+
+### Failure Memory (Phase 11)
+
+**Принцип:** Автоматическое извлечение информации о неудачах из сообщений перед компакцией.
+
+**Паттерны детекции:**
+```
+"не сработало", "failed", "doesn't work", "error", "ошибка"
+"попробовал", "tried", "attempted"
+"откатил", "reverted", "rolled back", "undo"
+"compilation error", "syntax error", "runtime error"
+"unexpected", "неожиданно", "странно"
+```
+
+**Структура записи:**
+```typescript
+{
+  approach: "Tried to use fs.readFileSync",
+  error: "ENOENT: no such file or directory",
+  reason: "File doesn't exist yet",
+  solution: "Use fs.existsSync check first",
+  context: "Additional context"
+}
+```
+
+**Пример:**
+```bash
+/memory-failures              # Показать все неудачи
+/memory-failures ENOENT       # Поиск по конкретной ошибке
+```
+
+### Background Learning (Phase 8)
+
+**Принцип:** Каждые 10 ходов автоматически извлекаются факты из последних 20 сообщений.
+
+**Зачем:** Если сессия короткая и compaction не сработает, факты всё равно сохранятся.
+
+**Как работает:**
+```typescript
+pi.on("turn_end", async (event, ctx) => {
+  turnCount++;
+  if (turnCount % 10 === 0) {
+    const recentMessages = getRecentMessages(20);
+    sessionMemory.extractAndSaveFacts(recentMessages);
+  }
+});
+```
+
+### Correction Detection (Phase 9)
+
+**Принцип:** Когда пользователь исправляет агента, это автоматически сохраняется как урок.
+
+**Паттерны детекции:**
+```
+"нет, это не так", "no, that's wrong"
+"исправь", "correct", "wrong", "неверно", "ошибка"
+"stop that", "don't do that"
+```
+
+**Как работает:**
+```typescript
+pi.on("message_update", async (event, ctx) => {
+  if (event.message.role === "user") {
+    const text = extractText(event.message.content);
+    if (CORRECTION_PATTERNS.some(p => p.test(text))) {
+      memoryDb.saveFact({
+        sessionId: sessionMemory.getSessionId(),
+        factType: "lesson",
+        content: `User correction: ${text.slice(0, 200)}`,
+      });
+    }
+  }
+});
+```
+
+### Secret Scanning (Phase 7)
+
+**Принцип:** Автоматическая проверка всех сохраняемых данных на наличие секретов (API keys, tokens, passwords).
+
+**Паттерны:**
+```
+OpenAI API keys:     sk-[a-zA-Z0-9]{32,}
+GitHub tokens:       ghp_[a-zA-Z0-9]{36}
+Bearer tokens:       Bearer\s+[a-zA-Z0-9\-._~+\/]+=*
+JWT tokens:          eyJ[a-zA-Z0-9_-]*\.eyJ...
+SSH private keys:    -----BEGIN RSA PRIVATE KEY-----
+AWS keys:            AKIA[0-9A-Z]{16}
+Passwords:           password\s*[:=]\s*["'][^"']+["']
+```
+
+**Как работает:**
+```typescript
+const scanResult = scanForSecrets(data.output);
+if (scanResult.hasSecret) {
+  console.warn(`🛡️ Secret detected, saving redacted version`);
+  outputToSave = redactSecret(data.output); // заменяет на [REDACTED]
+}
+```
+
+**Защита:**
+- `saveToolOutput` — проверка вывода инструментов
+- `saveSubagentResult` — проверка результатов субагентов
+- `saveCompactionSummary` — проверка detailed_summary
+- `saveFailure` — проверка записей о неудачах
+- `saveCompressedResult` — проверка сжатых результатов
+
+### Auto-Consolidation (Phase 10)
+
+**Принцип:** Автоматическое слияние похожих записей в `session_facts` для уменьшения дубликатов.
+
+**Алгоритм:**
+1. Вычисляется Jaccard similarity между записями
+2. Записи с similarity ≥ threshold (по умолчанию 0.7) группируются
+3. Группа сливается в одну запись (берётся самая длинная + уникальная информация)
+4. Дубликаты удаляются
+
+**Когда запускается:**
+- Автоматически при старте сессии, если `session_facts > 1000`
+- Вручную через команду `/memory-consolidate`
+
+**Пример:**
+```bash
+/memory-consolidate --dry-run     # Тест без изменений
+/memory-consolidate threshold=0.8 # Консолидация с порогом 0.8
+/memory-consolidate               # Запуск консолидации
+```
+
 ### Инжекция в промпт
 
 При запуске субагента:
@@ -462,17 +668,20 @@ pi-sub/
 ├── tools/
 │   └── register-tools.ts       # Переопределение инструментов
 ├── memory/
-│   ├── database.ts             # SQLite + FTS5
+│   ├── database.ts             # SQLite + FTS5 (монолитный, ~2000 строк)
 │   ├── session-memory.ts       # Извлечение фактов
-│   └── result-compressor.ts    # Сжатие результатов
+│   ├── result-compressor.ts    # Сжатие результатов
+│   └── consolidation.ts        # Auto-Consolidation
 ├── context-tools/
-│   ├── ctx-bash.ts             # bash с сохранением
-│   ├── ctx-read.ts             # read с сохранением
-│   ├── ctx-search.ts           # ctx_search (FTS5)
+│   ├── ctx-bash.ts             # bash с сохранением + deduplication + priority
+│   ├── ctx-read.ts             # read с сохранением + deduplication + priority
+│   ├── ctx-search.ts           # ctx_search (FTS5) с priority-based sorting
 │   └── utils/
-│       ├── analyzers.ts        # Анализаторы вывода
+│       ├── analyzers.ts        # Анализаторы вывода (git, npm, docker, build)
 │       ├── summary.ts          # Генерация summary
-│       └── compaction-summary.ts # Генерация detailed_summary + meta (Phase 6)
+│       ├── compaction-summary.ts # Генерация detailed_summary + meta
+│       ├── failure-detector.ts # Детектор неудач
+│       └── secret-scanner.ts   # Сканирование секретов
 ├── ui/
 │   └── agent-widget.ts         # Виджет статуса (80ms)
 └── renderers/
@@ -499,7 +708,10 @@ AgentRunner.runAgent()
     ├── Запускает agent loop
     │   ├── LLM вызывает инструменты
     │   ├── Инструменты сохраняют большие выводы в БД
-    │   └── При compaction_end → генерирует detailed_summary + meta (Phase 6)
+    │   │   ├── Deduplication через content_hash
+    │   │   ├── Priority System (1-10)
+    │   │   └── Secret Scanning
+    │   └── При compaction_end → генерирует detailed_summary + meta
     └── Собирает результат
     │
     ▼
@@ -509,9 +721,41 @@ onComplete callback
     └── Обновляет UI виджет
     │
     ▼
-onCompact callback (Phase 6)
+onCompact callback
     ├── Сохраняет summary + detailed_summary в compaction_summaries
     └── Сохраняет keywords в compaction_keywords
+```
+
+### Фоновые процессы
+
+```
+session_start
+    │
+    ├── Инициализация Session Memory
+    └── Auto-Consolidation (если session_facts > 1000)
+    │
+    ▼
+turn_end (каждые 10 ходов)
+    │
+    └── Background Learning: извлечение фактов из последних 20 сообщений
+    │
+    ▼
+message_update (user messages)
+    │
+    └── Correction Detection: детекция исправлений → сохранение как lesson
+    │
+    ▼
+session_before_compact
+    │
+    ├── Извлечение фактов (только main agent)
+    └── Извлечение неудач (Failure Memory)
+    │
+    ▼
+compaction_end (все агенты)
+    │
+    ├── Генерация detailed_summary + meta
+    ├── Сохранение в compaction_summaries
+    └── Сохранение keywords в compaction_keywords
 ```
 
 ### Типы агентов
@@ -553,22 +797,43 @@ sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM subagent_results;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM session_facts;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM compaction_keywords;"
 sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM compaction_summaries;"
+sqlite3 .pi/memory/unified.db "SELECT COUNT(*) FROM failures;"
 
-# Последние записи
-sqlite3 .pi/memory/unified.db "SELECT id, tool_name, size FROM tool_outputs ORDER BY timestamp DESC LIMIT 5;"
+# Последние записи с приоритетом
+sqlite3 .pi/memory/unified.db "SELECT id, tool_name, priority, size FROM tool_outputs ORDER BY priority DESC, timestamp DESC LIMIT 10;"
+
+# Статистика по приоритетам
+sqlite3 .pi/memory/unified.db "SELECT priority, COUNT(*) as count FROM tool_outputs GROUP BY priority ORDER BY priority DESC;"
 
 # Статистика ключевых слов
 sqlite3 .pi/memory/unified.db "SELECT category, COUNT(*) FROM compaction_keywords GROUP BY category;"
 
-# Компакции по агентам (Phase 6)
+# Компакции по агентам
 sqlite3 .pi/memory/unified.db "SELECT id, reason, tokens_before, length(detailed_summary) as detailed_len FROM compaction_summaries ORDER BY timestamp DESC LIMIT 5;"
+
+# Неудачи
+sqlite3 .pi/memory/unified.db "SELECT id, approach, error FROM failures ORDER BY timestamp DESC LIMIT 5;"
+
+# Дубликаты (по хэшу)
+sqlite3 .pi/memory/unified.db "SELECT content_hash, COUNT(*) as count FROM tool_outputs WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING count > 1;"
 ```
 
 ### Логи
 
 ```
-[pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Size: 12.5 MB
+[pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Failures: 3, Size: 12.5 MB
 [pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
+[pi-sub] 🔄 Auto-consolidation triggered (1234 facts)
+[pi-sub] 🔄 Consolidation complete: 15 groups, 45 records merged, 30 records deleted
+[pi-sub] 🎓 Background learning triggered (turn 10)
+[pi-sub] 🎓 Background learning saved 3 facts
+[pi-sub] ⚠️ Correction detected: нет, это не так, нужно использовать async/await
+[pi-sub] ⚠️ Saved correction as lesson
+[pi-sub] 🛡️ Secret detected in tool output (bash): OpenAI API key. Saving redacted version.
+[pi-sub] 💾 Saved tool output (ID: 42, hash: abc123def456, priority: 7, size: 15234 chars)
+[pi-sub] 🔄 Duplicate tool output detected (hash: abc123def456). Reusing ID: 42, priority: 7
+[pi-sub] ⚠️ Found 2 failures in session
+[pi-sub] ⚠️ Saved 2 failures to memory
 [pi-sub] 📦 Generated compaction summary for agent abc123: 47 msgs, 5234 chars, 8 files, 3 decisions, 2 lessons
 [pi-sub] 💾 Saved compaction summary (ID: 42, agent: research, 18432 tokens, 1234 chars summary, 5234 chars detailed)
 [pi-sub] 🔑 Saved 13 keywords for compaction 42 (8 files, 3 decisions, 2 lessons)
@@ -582,6 +847,9 @@ sqlite3 .pi/memory/unified.db "SELECT id, reason, tokens_before, length(detailed
 # Большой вывод (должен сохраниться в БД)
 bash "seq 1 10000"
 
+# Повторный вызов (должен показать ♻️ дубликат)
+bash "seq 1 10000"
+
 # Поиск по сохранённым
 ctx_search "seq"
 
@@ -590,6 +858,12 @@ ctx_search "id:1"
 
 # Поиск по ключевым словам
 /memory-keywords WAL
+
+# Поиск по неудачам
+/memory-failures ENOENT
+
+# Тест консолидации
+/memory-consolidate --dry-run
 
 # Тест всех операций
 /memory-test
@@ -669,12 +943,12 @@ pi.on("tool_call", (event, ctx) => {
 |-----------|------------|
 | Переопределённые инструменты | 5 (bash, read, grep, find, ls) |
 | Новые инструменты | 1 (ctx_search) |
-| Команды pi-sub | 14 |
-| События pi-sub | 7 |
+| Команды pi-sub | 16 |
+| События pi-sub | 9 |
 | События loop-police | 5 |
 | Фоновые процессы | 5 |
-| Таблицы БД | 6 |
-| FTS5 индексов | 6 |
+| Таблицы БД | 7 |
+| FTS5 индексов | 7 |
 
 ---
 
@@ -700,3 +974,10 @@ pi.on("tool_call", (event, ctx) => {
 10. **Динамические пути**: БД всегда в корневом `.pi/memory/`
 11. **Группировка результатов**: Keywords группируются по компакциям в ctx_search
 12. **Увеличенный preview**: 500 символов для detailed_summary вместо 150
+13. **Deduplication**: Экономия места в БД через SHA-256 хэши
+14. **Priority System**: Важные результаты (ошибки, тесты, git) показываются выше
+15. **Failure Memory**: Модель учится на прошлых ошибках
+16. **Secret Scanning**: Защита от утечек API keys, tokens, passwords
+17. **Background Learning**: Проактивное сохранение фактов каждые 10 ходов
+18. **Correction Detection**: Автоматическое сохранение исправлений пользователя
+19. **Auto-Consolidation**: Слияние похожих записей для уменьшения дубликатов

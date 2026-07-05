@@ -2,7 +2,7 @@
  * ctx-search.ts — Инструмент ctx_search
  * 
  * Ищет по ВСЕМ таблицам с FTS5:
- * - tool_outputs (выводы инструментов)
+ * - tool_outputs (выводы инструментов) — с учётом priority
  * - subagent_results (результаты субагентов)
  * - session_facts (извлечённые факты сессий)
  * - compaction_summaries (summary компакции контекста)
@@ -10,9 +10,15 @@
  * - compaction_keywords (нормализованные ключевые слова компакций)
  * 
  * Поддерживает специальный запрос "id:<number>" для получения полного вывода.
+ * 
+ * Phase 12: Priority-based sorting
+ * - Результаты tool_outputs сортируются по priority DESC, timestamp DESC
+ * - При поиске по ID показывается приоритет
+ * - Эмодзи приоритета для визуального различения
  */
 
 import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword } from "../memory/database.js";
+import { priorityEmoji, type Priority } from "../memory/utils/priority.js";
 
 export interface CtxSearchArgs {
   query: string;
@@ -26,6 +32,7 @@ interface SearchResult {
   date: string;
   preview: string;
   extra?: Record<string, string>;
+  priority?: Priority; // ← НОВОЕ: для tool_outputs
 }
 
 export function executeCtxSearch(
@@ -44,8 +51,10 @@ export function executeCtxSearch(
     // 1. Ищем в tool_outputs
     const toolOutput = db.getToolOutput(id);
     if (toolOutput) {
-      return `━━━ Full Output [ID: ${toolOutput.id}] ━━━\n` +
+      const emoji = priorityEmoji(toolOutput.priority as Priority);
+      return `━━━ ${emoji} Full Output [ID: ${toolOutput.id}] ━━━\n` +
              `Tool: ${toolOutput.tool_name}\n` +
+             `Priority: ${toolOutput.priority} ${emoji}\n` +
              `Date: ${new Date(toolOutput.timestamp).toLocaleString()}\n` +
              `Size: ${toolOutput.size} chars\n\n` +
              toolOutput.output;
@@ -94,15 +103,13 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
-    // 6. Ищем в compaction_keywords — ИСПРАВЛЕНИЕ ПРОБЛЕМЫ 4
-    // Если нашли keyword, показываем detailed_summary соответствующей компакции
+    // 6. Ищем в compaction_keywords
     const keywords = db.getCompactionKeywords(id);
     if (keywords.length > 0) {
       const compactionId = keywords[0].compaction_id;
       const compaction = db.getCompactionSummaryById(compactionId);
       
       if (compaction) {
-        // Показываем detailed_summary компакции, а не keywords
         let result = `━━━ Compaction Summary [ID: ${compaction.id}] ━━━\n`;
         result += `(Found via keyword ID: ${id})\n\n`;
         result += `Reason: ${compaction.reason}\n`;
@@ -114,7 +121,6 @@ export function executeCtxSearch(
           result += `## Detailed Summary\n${compaction.detailed_summary}\n\n`;
         }
         
-        // Показываем ключевые слова как дополнение
         const byCategory: Record<string, string[]> = {
           file: [],
           decision: [],
@@ -147,16 +153,22 @@ export function executeCtxSearch(
   try {
     const allResults: SearchResult[] = [];
     
-    // 1. Tool outputs
+    // 1. Tool outputs — уже отсортированы по priority DESC, timestamp DESC
     const toolResults = db.searchToolOutputs(query, limit);
     for (const r of toolResults) {
+      const emoji = priorityEmoji(r.priority as Priority);
       allResults.push({
         type: "tool_output",
         id: r.id,
-        title: `Tool: ${r.tool_name}`,
+        title: `${emoji} Tool: ${r.tool_name}`,
         date: new Date(r.timestamp).toLocaleString(),
         preview: r.summary || r.output.slice(0, 100),
-        extra: { Args: r.args, Size: `${r.size} chars` },
+        extra: { 
+          Args: r.args, 
+          Size: `${r.size} chars`,
+          Priority: `${r.priority} ${emoji}`,
+        },
+        priority: r.priority as Priority,
       });
     }
     
@@ -186,10 +198,9 @@ export function executeCtxSearch(
       });
     }
     
-    // 4. Compaction summaries — ИСПРАВЛЕНИЕ ПРОБЛЕМЫ 3
+    // 4. Compaction summaries
     const compactionResults = db.searchCompactionSummaries(query, limit);
     for (const r of compactionResults) {
-      // Увеличиваем preview до 500 символов
       const preview = r.detailed_summary?.slice(0, 500) || r.summary?.slice(0, 300) || "";
       
       allResults.push({
@@ -215,11 +226,9 @@ export function executeCtxSearch(
       });
     }
     
-    // 6. Compaction keywords — ИСПРАВЛЕНИЕ ПРОБЛЕМ 1+2
-    // Группируем по compaction_id, показываем одну строку на компакцию
-    const keywordResults = db.searchKeywords(query, limit * 3); // Получаем больше для группировки
+    // 6. Compaction keywords — группируем по compaction_id
+    const keywordResults = db.searchKeywords(query, limit * 3);
     
-    // Группируем по compaction_id
     const groupedKeywords = new Map<number, {
       keywords: typeof keywordResults;
       reason: string;
@@ -239,7 +248,6 @@ export function executeCtxSearch(
       groupedKeywords.get(r.compaction_id)!.keywords.push(r);
     }
     
-    // Добавляем сгруппированные результаты
     for (const [compactionId, group] of groupedKeywords) {
       const files = group.keywords
         .filter(k => k.category === "file")
@@ -265,7 +273,7 @@ export function executeCtxSearch(
       
       allResults.push({
         type: "compaction_keywords_group",
-        id: compactionId, // ← Используем compaction_id, а не keyword_id
+        id: compactionId,
         title: `Compaction Keywords: [${group.reason}] ${group.tokens_before} tokens`,
         date: new Date(group.timestamp).toLocaleString(),
         preview: preview || `${totalKeywords} keywords found`,
@@ -285,7 +293,7 @@ export function executeCtxSearch(
     if (results.length === 0) {
       return `No results found for: "${query}"\n\n` +
              `📊 Available data sources:\n` +
-             `  • tool_outputs — tool command outputs\n` +
+             `  • tool_outputs — tool command outputs (sorted by priority)\n` +
              `  • subagent_results — subagent execution results\n` +
              `  • session_facts — extracted session facts\n` +
              `  • compaction_summaries — context compaction summaries\n` +

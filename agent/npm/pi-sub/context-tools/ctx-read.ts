@@ -1,11 +1,16 @@
 /**
- * ctx-read.ts — Инструмент read с сохранением контекста
+ * ctx-read.ts — Инструмент read с сохранением контекста.
+ * 
+ * Phase 12: Deduplication + Priority System
+ * - При повторном чтении того же файла — возвращает существующий ID
+ * - Вычисляет приоритет для сортировки в ctx_search
  */
 
 import { readFile, stat } from "node:fs/promises";
 import { MemoryDatabase } from "../memory/database.js";
 import { generateSummary } from "./utils/summary.js";
 import { logger } from "./utils/logger.js";
+import { priorityEmoji } from "../memory/utils/priority.js";
 
 const LARGE_OUTPUT_THRESHOLD = 5000;
 
@@ -45,17 +50,34 @@ export async function executeCtxRead(
     logger.info(`Large file (${content.length} chars), saving to DB`);
     
     try {
-      // Передаём path в контексте для анализатора
+      // Генерируем summary и сохраняем в БД
       const summary = generateSummary("read", content, { path });
-      const id = db.saveToolOutput({
+      const result = db.saveToolOutput({
         toolName: "read",
         args: JSON.stringify({ path, offset, limit }),
         output: content,
         summary,
       });
       
-      logger.info(`Saved to DB with ID: ${id}`);
-      return `${summary}\n\n💾 Полное содержимое файла сохранено (ID: ${id}). Используй ctx_search "id:${id}" для получения полного вывода.`;
+      const emoji = priorityEmoji(result.priority);
+      
+      if (result.isNew) {
+        // Новый вывод — сохраняем
+        logger.info(`Saved to DB with ID: ${result.id}, priority: ${result.priority}`);
+        return (
+          `${result.summary}\n\n` +
+          `${emoji} Полное содержимое файла сохранено (ID: ${result.id}, priority: ${result.priority}). ` +
+          `Используй ctx_search "id:${result.id}" для получения полного вывода.`
+        );
+      } else {
+        // Дубликат — используем существующий
+        logger.info(`Duplicate detected, reusing ID: ${result.id}, priority: ${result.priority}`);
+        return (
+          `${result.summary}\n\n` +
+          `♻️ Файл уже сохранён (ID: ${result.id}, priority: ${result.priority}). ` +
+          `Используй ctx_search "id:${result.id}" для получения полного вывода.`
+        );
+      }
     } catch (err) {
       logger.error(`Failed to save to DB: ${err}`);
       return content.slice(0, LARGE_OUTPUT_THRESHOLD) + "\n\n[Файл обрезан из-за ошибки сохранения]";
