@@ -8,6 +8,7 @@
  * - compaction_summaries (summary компакции контекста)
  * - compressed_results (сжатые результаты)
  * - compaction_keywords (нормализованные ключевые слова компакций)
+ * - failures (память о неудачах) — v9.2 fix
  * 
  * Поддерживает специальные запросы:
  * - "id:<number>" — получение полного вывода по числовому ID
@@ -16,9 +17,10 @@
  * Phase 12: Priority-based sorting
  * v9: Исправлена обработка строковых ID для subagent_results
  * v9.1: Добавлена поддержка укороченных UUID
+ * v9.2: Добавлен поиск по failures (CRITICAL FIX)
  */
 
-import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword } from "../memory/database.js";
+import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword, type FailureRecord } from "../memory/database.js";
 import { priorityEmoji, type Priority } from "../memory/utils/priority.js";
 
 export interface CtxSearchArgs {
@@ -27,7 +29,7 @@ export interface CtxSearchArgs {
 }
 
 interface SearchResult {
-  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keywords_group";
+  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keywords_group" | "failure_record";
   id: number | string;
   title: string;
   date: string;
@@ -104,8 +106,8 @@ export function executeCtxSearch(
                subagentResult.result;
       }
       return `❌ No subagent result found with ID: ${idStr}\n` +
-       `💡 Tip: pi uses shortened UUIDs. Try the ID from ctx_search results ` +
-       `(e.g., "28622e05-cd3b-492") or just the first 8 characters.`;
+             `💡 Tip: pi uses shortened UUIDs. Try the ID from ctx_search results ` +
+             `(e.g., "28622e05-cd3b-492") or just the first 8 characters.`;
     }
     
     // Числовой ID — для остальных таблиц
@@ -158,7 +160,27 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
-    // 5. Ищем в compaction_keywords (по keyword ID)
+    // 5. Ищем в failures — v9.2 fix
+    const failure = db.getFailureById(id);
+    if (failure) {
+      let result = `━━━ ⚠️ Full Failure Record [ID: ${failure.id}] ━━━\n` +
+                   `Session: ${failure.session_id}\n` +
+                   `Date: ${new Date(failure.timestamp).toLocaleString()}\n\n`;
+      result += `## Approach\n${failure.approach}\n\n`;
+      result += `## Error\n${failure.error}\n\n`;
+      if (failure.reason) {
+        result += `## Reason\n${failure.reason}\n\n`;
+      }
+      if (failure.solution) {
+        result += `## Solution\n${failure.solution}\n\n`;
+      }
+      if (failure.context) {
+        result += `## Context\n${failure.context}\n`;
+      }
+      return result;
+    }
+    
+    // 6. Ищем в compaction_keywords (по keyword ID)
     const keywords = db.getCompactionKeywords(id);
     if (keywords.length > 0) {
       const compactionId = keywords[0].compaction_id;
@@ -339,6 +361,22 @@ export function executeCtxSearch(
       });
     }
     
+    // 7. Failures (неудачные подходы) — v9.2 fix
+    const failureResults = db.searchFailures(query, limit);
+    for (const r of failureResults) {
+      allResults.push({
+        type: "failure_record",
+        id: r.id,
+        title: `⚠️ Failure: ${r.approach?.slice(0, 50) || "Unknown approach"}`,
+        date: new Date(r.timestamp).toLocaleString(),
+        preview: r.error?.slice(0, 150) || "",
+        extra: {
+          "Session": r.session_id,
+          "Solution": r.solution?.slice(0, 80) || "N/A",
+        },
+      });
+    }
+    
     // Сортируем по дате (новые сверху)
     allResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     
@@ -353,7 +391,8 @@ export function executeCtxSearch(
              `  • session_facts — extracted session facts\n` +
              `  • compaction_summaries — context compaction summaries\n` +
              `  • compressed_results — compressed cached results\n` +
-             `  • compaction_keywords — normalized keywords from compactions`;
+             `  • compaction_keywords — normalized keywords from compactions\n` +
+             `  • failure_records — failed approaches and their solutions`;
     }
     
     // Подсчёт по типам
@@ -373,6 +412,7 @@ export function executeCtxSearch(
         compaction_summary: "📦",
         compressed_result: "🗜️",
         compaction_keywords_group: "🔑",
+        failure_record: "⚠️",
       };
       const icon = typeIcons[result.type] || "📄";
       

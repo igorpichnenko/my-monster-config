@@ -4,12 +4,15 @@
  * Отвечает за:
  * - Создание таблиц при первой инициализации
  * - Миграции при изменении версии схемы
+ * 
+ * v10: Добавлен триггер UPDATE для session_facts (критическое исправление)
+ *      Убраны старые миграции (v2-v9) — БД пересоздаётся с нуля
  */
 
 import type Database from "better-sqlite3";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Инициализирует схему БД.
@@ -110,7 +113,6 @@ function createAllTables(db: Database.Database): void {
       tokenize='unicode61'
     );
 
-    -- v9: Триггеры для subagent_results (были пропущены в v8!)
     CREATE TRIGGER IF NOT EXISTS subagent_results_ai AFTER INSERT ON subagent_results BEGIN
       INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
       VALUES (new.rowid, new.agent_type, new.description, new.result);
@@ -157,6 +159,15 @@ function createAllTables(db: Database.Database): void {
     CREATE TRIGGER IF NOT EXISTS session_facts_ad AFTER DELETE ON session_facts BEGIN
       INSERT INTO session_facts_fts(session_facts_fts, rowid, fact_type, content)
       VALUES ('delete', old.id, old.fact_type, old.content);
+    END;
+
+    -- v10: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавлен триггер UPDATE для session_facts
+    -- Без него consolidation.ts обновляет контент, но FTS5 индекс остаётся старым
+    CREATE TRIGGER IF NOT EXISTS session_facts_au AFTER UPDATE ON session_facts BEGIN
+      INSERT INTO session_facts_fts(session_facts_fts, rowid, fact_type, content)
+      VALUES ('delete', old.id, old.fact_type, old.content);
+      INSERT INTO session_facts_fts(rowid, fact_type, content)
+      VALUES (new.id, new.fact_type, new.content);
     END;
 
     -- Compressed Results Cache
@@ -320,231 +331,37 @@ function createAllTables(db: Database.Database): void {
 
 /**
  * Выполняет миграции от старой версии до текущей.
+ * 
+ * v10: Только добавление триггера UPDATE для session_facts
+ *      (критическое исправление для consolidation.ts)
+ * 
+ * Старые миграции (v2-v9) удалены — БД пересоздаётся с нуля.
  */
 function migrate(db: Database.Database, fromVersion: number): void {
   console.log(`[pi-sub] Migrating schema from v${fromVersion} to v${SCHEMA_VERSION}`);
 
-  if (fromVersion < 2) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS compaction_summaries (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        reason TEXT NOT NULL CHECK(reason IN ('manual', 'threshold', 'overflow')),
-        tokens_before INTEGER NOT NULL,
-        summary TEXT NOT NULL,
-        timestamp INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_compaction_summaries_timestamp 
-        ON compaction_summaries(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_compaction_summaries_session 
-        ON compaction_summaries(session_id);
-    `);
-  }
-
-  if (fromVersion < 3) {
-    const columns = db.prepare("PRAGMA table_info(compaction_summaries)").all() as Array<{ name: string }>;
-    if (!columns.some(c => c.name === "detailed_summary")) {
-      db.exec(`ALTER TABLE compaction_summaries ADD COLUMN detailed_summary TEXT NOT NULL DEFAULT ''`);
-    }
-  }
-
-  if (fromVersion < 4) {
-    const columns = db.prepare("PRAGMA table_info(compaction_summaries)").all() as Array<{ name: string }>;
-    if (!columns.some(c => c.name === "detailed_summary")) {
-      db.exec(`ALTER TABLE compaction_summaries ADD COLUMN detailed_summary TEXT NOT NULL DEFAULT ''`);
-    }
+  // v10: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавляем триггер UPDATE для session_facts
+  // Без него consolidation.ts обновляет контент через updateFactContent(),
+  // но FTS5 индекс остаётся старым → поиск возвращает устаревшие данные
+  if (fromVersion < 10) {
+    console.log(`[pi-sub] Migrating to v10: Adding session_facts UPDATE trigger (CRITICAL FIX)`);
     
     db.exec(`
-      DROP TABLE IF EXISTS compaction_summaries_fts;
-      CREATE VIRTUAL TABLE IF NOT EXISTS compaction_summaries_fts USING fts5(
-        reason, summary, detailed_summary,
-        content='compaction_summaries',
-        content_rowid='id',
-        tokenize='unicode61'
-      );
-      CREATE TRIGGER IF NOT EXISTS compaction_summaries_ai AFTER INSERT ON compaction_summaries BEGIN
-        INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
-        VALUES (new.id, new.reason, new.summary, new.detailed_summary);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compaction_summaries_ad AFTER DELETE ON compaction_summaries BEGIN
-        INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
-        VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compaction_summaries_au AFTER UPDATE ON compaction_summaries BEGIN
-        INSERT INTO compaction_summaries_fts(compaction_summaries_fts, rowid, reason, summary, detailed_summary)
-        VALUES ('delete', old.id, old.reason, old.summary, old.detailed_summary);
-        INSERT INTO compaction_summaries_fts(rowid, reason, summary, detailed_summary)
-        VALUES (new.id, new.reason, new.summary, new.detailed_summary);
-      END;
-    `);
-  }
-
-  if (fromVersion < 5) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS compressed_results_new (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        original_hash TEXT NOT NULL UNIQUE,
-        compressed TEXT NOT NULL,
-        timestamp INTEGER NOT NULL
-      );
-      INSERT INTO compressed_results_new (original_hash, compressed, timestamp)
-        SELECT original_hash, compressed, timestamp FROM compressed_results;
-      DROP TABLE compressed_results;
-      ALTER TABLE compressed_results_new RENAME TO compressed_results;
-      CREATE INDEX IF NOT EXISTS idx_compressed_results_timestamp 
-        ON compressed_results(timestamp DESC);
-      CREATE VIRTUAL TABLE IF NOT EXISTS compressed_results_fts USING fts5(
-        original_hash, compressed,
-        content='compressed_results',
-        content_rowid='id',
-        tokenize='unicode61'
-      );
-      CREATE TRIGGER IF NOT EXISTS compressed_results_ai AFTER INSERT ON compressed_results BEGIN
-        INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
-        VALUES (new.id, new.original_hash, new.compressed);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compressed_results_ad AFTER DELETE ON compressed_results BEGIN
-        INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
-        VALUES ('delete', old.id, old.original_hash, old.compressed);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compressed_results_au AFTER UPDATE ON compressed_results BEGIN
-        INSERT INTO compressed_results_fts(compressed_results_fts, rowid, original_hash, compressed)
-        VALUES ('delete', old.id, old.original_hash, old.compressed);
-        INSERT INTO compressed_results_fts(rowid, original_hash, compressed)
-        VALUES (new.id, new.original_hash, new.compressed);
-      END;
-    `);
-  }
-
-  if (fromVersion < 6) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS compaction_keywords (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        compaction_id INTEGER NOT NULL,
-        keyword TEXT NOT NULL,
-        category TEXT NOT NULL CHECK(category IN ('file', 'decision', 'lesson')),
-        timestamp INTEGER NOT NULL,
-        FOREIGN KEY (compaction_id) REFERENCES compaction_summaries(id) ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_compaction_keywords_compaction 
-        ON compaction_keywords(compaction_id);
-      CREATE INDEX IF NOT EXISTS idx_compaction_keywords_category 
-        ON compaction_keywords(category);
-      CREATE INDEX IF NOT EXISTS idx_compaction_keywords_timestamp 
-        ON compaction_keywords(timestamp DESC);
-      CREATE VIRTUAL TABLE IF NOT EXISTS compaction_keywords_fts USING fts5(
-        keyword,
-        content='compaction_keywords',
-        content_rowid='id',
-        tokenize='unicode61'
-      );
-      CREATE TRIGGER IF NOT EXISTS compaction_keywords_ai AFTER INSERT ON compaction_keywords BEGIN
-        INSERT INTO compaction_keywords_fts(rowid, keyword)
-        VALUES (new.id, new.keyword);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compaction_keywords_ad AFTER DELETE ON compaction_keywords BEGIN
-        INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
-        VALUES ('delete', old.id, old.keyword);
-      END;
-      CREATE TRIGGER IF NOT EXISTS compaction_keywords_au AFTER UPDATE ON compaction_keywords BEGIN
-        INSERT INTO compaction_keywords_fts(compaction_keywords_fts, rowid, keyword)
-        VALUES ('delete', old.id, old.keyword);
-        INSERT INTO compaction_keywords_fts(rowid, keyword)
-        VALUES (new.id, new.keyword);
-      END;
-    `);
-  }
-
-  if (fromVersion < 7) {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS failures (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        approach TEXT NOT NULL,
-        error TEXT NOT NULL,
-        reason TEXT,
-        solution TEXT,
-        context TEXT,
-        timestamp INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_failures_timestamp 
-        ON failures(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_failures_session
-        ON failures(session_id);
-      CREATE VIRTUAL TABLE IF NOT EXISTS failures_fts USING fts5(
-        approach, error, reason, solution, context,
-        content='failures',
-        content_rowid='id',
-        tokenize='unicode61'
-      );
-      CREATE TRIGGER IF NOT EXISTS failures_ai AFTER INSERT ON failures BEGIN
-        INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
-        VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
-      END;
-      CREATE TRIGGER IF NOT EXISTS failures_ad AFTER DELETE ON failures BEGIN
-        INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
-        VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
-      END;
-      CREATE TRIGGER IF NOT EXISTS failures_au AFTER UPDATE ON failures BEGIN
-        INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
-        VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
-        INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
-        VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
-      END;
-    `);
-  }
-
-  // v8: Добавляем content_hash и priority в tool_outputs
-  if (fromVersion < 8) {
-    console.log(`[pi-sub] Migrating to v8: Adding content_hash and priority to tool_outputs`);
-    
-    const columns = db.prepare("PRAGMA table_info(tool_outputs)").all() as Array<{ name: string }>;
-    
-    if (!columns.some(c => c.name === "content_hash")) {
-      db.exec(`
-        ALTER TABLE tool_outputs ADD COLUMN content_hash TEXT;
-        CREATE INDEX IF NOT EXISTS idx_tool_outputs_hash ON tool_outputs(content_hash);
-      `);
-    }
-    
-    if (!columns.some(c => c.name === "priority")) {
-      db.exec(`
-        ALTER TABLE tool_outputs ADD COLUMN priority INTEGER NOT NULL DEFAULT 5;
-        CREATE INDEX IF NOT EXISTS idx_tool_outputs_priority ON tool_outputs(priority DESC);
-      `);
-    }
-  }
-
-  // v9: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавляем триггеры для subagent_results
-  // В v8 они были пропущены, из-за чего FTS5 не индексировал новые записи
-  if (fromVersion < 9) {
-    console.log(`[pi-sub] Migrating to v9: Adding subagent_results triggers (CRITICAL FIX)`);
-    
-    db.exec(`
-      -- Создаём триггеры для subagent_results
-      CREATE TRIGGER IF NOT EXISTS subagent_results_ai AFTER INSERT ON subagent_results BEGIN
-        INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
-        VALUES (new.rowid, new.agent_type, new.description, new.result);
+      -- Добавляем триггер UPDATE для session_facts
+      CREATE TRIGGER IF NOT EXISTS session_facts_au AFTER UPDATE ON session_facts BEGIN
+        INSERT INTO session_facts_fts(session_facts_fts, rowid, fact_type, content)
+        VALUES ('delete', old.id, old.fact_type, old.content);
+        INSERT INTO session_facts_fts(rowid, fact_type, content)
+        VALUES (new.id, new.fact_type, new.content);
       END;
 
-      CREATE TRIGGER IF NOT EXISTS subagent_results_ad AFTER DELETE ON subagent_results BEGIN
-        INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
-        VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS subagent_results_au AFTER UPDATE ON subagent_results BEGIN
-        INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
-        VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
-        INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
-        VALUES (new.rowid, new.agent_type, new.description, new.result);
-      END;
-
-      -- Перестраиваем FTS5 индекс для существующих записей
-      -- Это добавит в индекс все записи, которые были сохранены до добавления триггеров
-      INSERT INTO subagent_results_fts(subagent_results_fts) VALUES('rebuild');
+      -- Перестраиваем FTS5 индекс для session_facts
+      -- Это синхронизирует индекс с текущим состоянием таблицы
+      -- (важно для записей, которые были обновлены до добавления триггера)
+      INSERT INTO session_facts_fts(session_facts_fts) VALUES('rebuild');
     `);
     
-    console.log(`[pi-sub] ✅ subagent_results FTS5 index rebuilt`);
+    console.log(`[pi-sub] ✅ session_facts UPDATE trigger added, FTS5 index rebuilt`);
   }
 
   db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);

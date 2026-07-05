@@ -2,6 +2,7 @@
  * subagent-results.repository.ts — Репозиторий для subagent_results.
  * 
  * v9: Исправлен search() — экранирование специальных символов FTS5
+ * v9.3: save() возвращает number, использует ON CONFLICT DO UPDATE для сохранения timestamp
  */
 
 import type Database from "better-sqlite3";
@@ -40,6 +41,15 @@ function escapeFts5Query(query: string): string {
 export class SubagentResultsRepository {
   constructor(private db: Database.Database) {}
 
+  /**
+   * Сохранить результат субагента.
+   * 
+   * v9.3: Возвращает количество затронутых строк (0 = не изменилось, 1 = вставлено/обновлено).
+   * Использует ON CONFLICT DO UPDATE вместо INSERT OR REPLACE, чтобы:
+   * - Сохранить оригинальный timestamp (не обновлять при перезаписи)
+   * - Сохранить rowid (важно для FTS5 триггеров)
+   * - Бросить ошибку при сбое (вместо silent failure)
+   */
   save(data: {
     id: string;
     agentType: string;
@@ -48,7 +58,7 @@ export class SubagentResultsRepository {
     status: string;
     toolUses: number;
     durationMs: number;
-  }): void {
+  }): number {
     const scanResult = scanForSecrets(data.result);
     let resultToSave = data.result;
     
@@ -61,20 +71,37 @@ export class SubagentResultsRepository {
       resultToSave = redactSecret(data.result);
     }
     
-    this.db.prepare(`
-      INSERT OR REPLACE INTO subagent_results 
-      (id, agent_type, description, result, timestamp, status, tool_uses, duration_ms)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      data.id,
-      data.agentType,
-      data.description,
-      resultToSave,
-      Date.now(),
-      data.status,
-      data.toolUses,
-      data.durationMs
-    );
+    try {
+      const result = this.db.prepare(`
+        INSERT INTO subagent_results 
+        (id, agent_type, description, result, timestamp, status, tool_uses, duration_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          agent_type = excluded.agent_type,
+          description = excluded.description,
+          result = excluded.result,
+          status = excluded.status,
+          tool_uses = excluded.tool_uses,
+          duration_ms = excluded.duration_ms
+      `).run(
+        data.id,
+        data.agentType,
+        data.description,
+        resultToSave,
+        Date.now(),
+        data.status,
+        data.toolUses,
+        data.durationMs
+      );
+      
+      return result.changes;
+    } catch (err) {
+      console.error(
+        `[pi-sub] ❌ Failed to save subagent result ${data.id}:`,
+        err instanceof Error ? err.message : String(err)
+      );
+      throw err;
+    }
   }
 
   getById(id: string): SubagentResult | undefined {

@@ -225,7 +225,7 @@ export default function (pi: ExtensionAPI) {
       // Сохранение результата субагента в БД
       if (memoryDb && record.result) {
         try {
-          memoryDb.saveSubagentResult({
+          const changes = memoryDb.saveSubagentResult({
             id: record.id,
             agentType: record.type,
             description: record.description,
@@ -236,9 +236,14 @@ export default function (pi: ExtensionAPI) {
               ? record.completedAt - record.startedAt
               : 0,
           });
+          
+          console.log(
+            `[pi-sub] 💾 Saved subagent result ${record.id} ` +
+            `(${changes > 0 ? 'inserted/updated' : 'no changes'})`
+          );
         } catch (err) {
           console.error(
-            `[pi-sub] Failed to save subagent result to memory DB:`,
+            `[pi-sub] ❌ Failed to save subagent result to memory DB:`,
             err,
           );
         }

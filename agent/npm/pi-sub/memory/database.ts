@@ -131,6 +131,7 @@ export class MemoryDatabase {
   }
 
   // Subagent Results
+  // v9.3: Теперь возвращает number (количество затронутых строк)
   saveSubagentResult(data: Parameters<SubagentResultsRepository["save"]>[0]) {
     return this.subagentResults.save(data);
   }
