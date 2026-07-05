@@ -32,7 +32,7 @@ interface SearchResult {
   date: string;
   preview: string;
   extra?: Record<string, string>;
-  priority?: Priority; // ← НОВОЕ: для tool_outputs
+  priority?: Priority;
 }
 
 export function executeCtxSearch(

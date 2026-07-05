@@ -6,6 +6,7 @@
  * - ctx_stats закомментирован (экономия ~50-80 токенов)
  * - Добавлена подсказка Ctrl+O для разворачивания результатов
  * - ctx_search поддерживает expanded через Ctrl+O
+ * - Phase 12: Улучшена обработка пустых результатов и приоритетов
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -16,7 +17,6 @@ import type { MemoryDatabase } from "../memory/database.js";
 import { executeCtxBash, type CtxBashArgs } from "../context-tools/ctx-bash.js";
 import { executeCtxRead, type CtxReadArgs } from "../context-tools/ctx-read.js";
 import { executeCtxSearch, type CtxSearchArgs } from "../context-tools/ctx-search.js";
-// import { executeCtxStats } from "../context-tools/ctx-stats.js";  // ← Закомментировано для экономии токенов
 
 /** Подсказка для разворачивания результата */
 const EXPAND_HINT = " (Ctrl+O to expand)";
@@ -29,9 +29,13 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
     return new Text(theme.fg("accent", "⠙") + ` ${label}…`, 0, 0);
   }
   
-  // Если текст пустой
+  // Если текст пустой — показываем предупреждение вместо "empty"
   if (!text || text.length === 0) {
-    return new Text(theme.fg("success", "✓") + " done (empty)", 0, 0);
+    return new Text(
+      theme.fg("warning", "⚠") + " done (no results)" + 
+      theme.fg("dim", " — команда не нашла совпадений"),
+      0, 0
+    );
   }
   
   // Получаем первую строку для превью
@@ -54,8 +58,8 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
   }
   
   // Для больших результатов с "💾 Полный вывод сохранён"
-  if (text.includes("💾 Полный вывод сохранён") || text.includes("💾 Полное содержимое файла сохранено")) {
-    const summaryMatch = text.match(/^(.*?)\n\n💾/s);
+  if (text.includes("💾 Полный вывод сохранён") || text.includes("💾 Полное содержимое файла сохранено") || text.includes("Полный вывод сохранён")) {
+    const summaryMatch = text.match(/^(.*?)\n\n/s);
     const summary = summaryMatch ? summaryMatch[1] : text.slice(0, 200);
     
     if (expanded) {
@@ -64,6 +68,25 @@ function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, 
       const summaryFirstLine = summary.split("\n").find((l: string) => l.trim()) || "";
       return new Text(
         theme.fg('success', '✓ saved to DB') +
+          theme.fg('dim', ` — ${summaryFirstLine.slice(0, 80)}`) +
+          theme.fg('muted', EXPAND_HINT),
+        0,
+        0
+      );
+    }
+  }
+  
+  // Для результатов с дубликатами (♻️)
+  if (text.includes("♻️")) {
+    const summaryMatch = text.match(/^(.*?)\n\n/s);
+    const summary = summaryMatch ? summaryMatch[1] : text.slice(0, 200);
+    
+    if (expanded) {
+      return new Text(theme.fg("success", "✓ duplicate detected\n\n") + theme.fg("dim", summary), 0, 0);
+    } else {
+      const summaryFirstLine = summary.split("\n").find((l: string) => l.trim()) || "";
+      return new Text(
+        theme.fg('success', '✓ duplicate detected') +
           theme.fg('dim', ` — ${summaryFirstLine.slice(0, 80)}`) +
           theme.fg('muted', EXPAND_HINT),
         0,
@@ -94,8 +117,8 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "Execute bash command with context preservation. Large outputs (>5000 chars) are automatically saved to database and replaced with summary. Use ctx_search to find details later.",
     promptSnippet: "Execute bash with context preservation",
     parameters: Type.Object({
-      command: Type.String(),  // ← Убрано description
-      timeout: Type.Optional(Type.Number()),  // ← Убрано description
+      command: Type.String(),
+      timeout: Type.Optional(Type.Number()),
     }),
     
     renderCall(args, theme) {
@@ -126,9 +149,9 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "Read file contents with context preservation. Supports offset/limit for large files. Large outputs (>5000 chars) are automatically saved to database and replaced with summary. Use ctx_search with 'id:<number>' to get full output.",
     promptSnippet: "Read file with context preservation",
     parameters: Type.Object({
-      path: Type.String(),  // ← Убрано description
-      offset: Type.Optional(Type.Number()),  // ← Убрано description
-      limit: Type.Optional(Type.Number()),  // ← Убрано description
+      path: Type.String(),
+      offset: Type.Optional(Type.Number()),
+      limit: Type.Optional(Type.Number()),
     }),
     
     renderCall(args, theme) {
@@ -159,9 +182,9 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "Search for pattern in files with context preservation. Large outputs (>5000 chars) are automatically saved to database and replaced with summary. Use ctx_search to find details later.",
     promptSnippet: "Search files with context preservation",
     parameters: Type.Object({
-      pattern: Type.String(),  // ← Убрано description
-      path: Type.Optional(Type.String()),  // ← Убрано description
-      options: Type.Optional(Type.String()),  // ← Убрано description
+      pattern: Type.String(),
+      path: Type.Optional(Type.String()),
+      options: Type.Optional(Type.String()),
     }),
     
     renderCall(args, theme) {
@@ -196,9 +219,9 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "Search for files by pattern with context preservation. Large outputs (>5000 chars) are automatically saved to database and replaced with summary. Use ctx_search to find details later.",
     promptSnippet: "Find files with context preservation",
     parameters: Type.Object({
-      pattern: Type.String(),  // ← Убрано description
-      path: Type.Optional(Type.String()),  // ← Убрано description
-      limit: Type.Optional(Type.Number()),  // ← Убрано description
+      pattern: Type.String(),
+      path: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number()),
     }),
     
     renderCall(args, theme) {
@@ -233,8 +256,8 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "List directory contents with context preservation. Large outputs (>5000 chars) are automatically saved to database and replaced with summary. Use ctx_search to find details later.",
     promptSnippet: "List directory with context preservation",
     parameters: Type.Object({
-      path: Type.Optional(Type.String()),  // ← Убрано description
-      options: Type.Optional(Type.String()),  // ← Убрано description
+      path: Type.Optional(Type.String()),
+      options: Type.Optional(Type.String()),
     }),
     
     renderCall(args, theme) {
@@ -269,8 +292,8 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     description: "Search through saved tool outputs and file contents using full-text search (FTS5). Use query 'id:<number>' to get full output by ID.",
     promptSnippet: "Search saved outputs",
     parameters: Type.Object({
-      query: Type.String(),  // ← Убрано description
-      limit: Type.Optional(Type.Number()),  // ← Убрано description
+      query: Type.String(),
+      limit: Type.Optional(Type.Number()),
     }),
     
     renderCall(args, theme) {
@@ -289,13 +312,35 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
         return new Text(theme.fg("warning", "⚠") + " no results", 0, 0);
       }
       
-      const match = text.match(/Found (\d+) result/);
-      const count = match ? match[1] : "?";
+      // Определяем формат вывода и извлекаем количество результатов
+      let count = "0";
+      let title = "results";
+      
+      if (text.includes("Full Output [ID:") || text.includes("Full Subagent Result [ID:") || 
+          text.includes("Full Session Fact [ID:") || text.includes("Full Compaction Summary [ID:") ||
+          text.includes("Full Compressed Result [ID:") || text.includes("Compaction Summary [ID:")) {
+        // Поиск по ID — всегда 1 результат
+        count = "1";
+        title = "output";
+      } else if (text.includes("No result found with ID:")) {
+        // ID не найден
+        count = "0";
+        title = "results";
+      } else if (text.includes("No results found for:")) {
+        // Обычный поиск не нашёл результатов
+        count = "0";
+        title = "results";
+      } else {
+        // Обычный поиск с результатами
+        const match = text.match(/Found (\d+) result/);
+        count = match ? match[1] : "0";
+        title = "results";
+      }
       
       // Если развёрнуто — показываем полный результат
       if (expanded) {
         return new Text(
-          theme.fg("success", `✓ found ${count} results\n\n`) + 
+          theme.fg("success", `✓ found ${count} ${title}\n\n`) + 
           theme.fg("dim", text),
           0,
           0
@@ -307,7 +352,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       const firstLine = text.split("\n")[0] || "";
       
       return new Text(
-        theme.fg("success", `✓ found ${count} results`) +
+        theme.fg("success", `✓ found ${count} ${title}`) +
           theme.fg("dim", ` — ${firstLine.slice(0, 80)}`) +
           theme.fg("muted", EXPAND_HINT),
         0,
@@ -324,38 +369,4 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       }
     },
   }));
-
-  // ========================================================================
-  // ctx_stats — ЗАКОММЕНТИРОВАНО для экономии ~50-80 токенов в system prompt
-  // Статистика доступна через команду /memory-stats
-  // ========================================================================
-  /*
-  pi.registerTool(defineTool({
-    name: "ctx_stats",
-    label: "Context DB Stats",
-    description: "Show statistics about saved data in context database.",
-    promptSnippet: "Show context DB statistics",
-    parameters: Type.Object({}),
-    
-    renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("ctx_stats")), 0, 0);
-    },
-    
-    renderResult(result, { isPartial }, theme) {
-      if (isPartial) {
-        return new Text(theme.fg("accent", "⠙") + " getting stats…", 0, 0);
-      }
-      return new Text(theme.fg("success", "✓") + " stats", 0, 0);
-    },
-    
-    execute: async (toolCallId, params, signal, onUpdate, ctx) => {
-      try {
-        const result = executeCtxStats(memoryDb);
-        return { content: [{ type: "text" as const, text: result }] };
-      } catch (err) {
-        return { content: [{ type: "text" as const, text: `Error: ${err instanceof Error ? err.message : String(err)}` }] };
-      }
-    },
-  }));
-  */
 }

@@ -21,6 +21,8 @@
 | **Утечка секретов** | Secret Scanning (API keys, tokens) | ✅ Автоматическая маскировка |
 | **Пропуск важных фактов** | Background Learning (каждые 10 ходов) | ✅ Проактивное сохранение |
 | **Игнорирование исправлений** | Correction Detection | ✅ Модель запоминает правки |
+| **Рост БД** | Automatic Purge (раз в неделю) | ✅ Контроль размера БД |
+| **Повреждение WAL** | memoryDb.close() в session_shutdown | ✅ Безопасное закрытие БД |
 
 ---
 
@@ -235,9 +237,9 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 
 | Событие | Действие |
 |---------|----------|
-| `session_start` | Инициализация UI, set session ID, auto-consolidation если > 1000 записей |
+| `session_start` | Инициализация UI, set session ID, auto-consolidation если > 1000 записей, **automatic purge** если > 50 MB |
 | `session_before_switch` | Очистка завершённых агентов |
-| `session_shutdown` | Abort всех, dispose |
+| `session_shutdown` | Abort всех, dispose, **закрытие БД** (memoryDb.close()) |
 | `tool_execution_start` | Обновление UI виджета |
 | `tool_result` | Обрезка вывода до 5KB |
 | `turn_end` | **Background Learning**: каждые 10 ходов извлекает факты |
@@ -636,6 +638,61 @@ if (scanResult.hasSecret) {
 /memory-consolidate               # Запуск консолидации
 ```
 
+### Automatic Purge (Phase 13)
+
+**Принцип:** Автоматическая очистка старых данных из БД раз в неделю для контроля размера.
+
+**Когда запускается:**
+- Автоматически при старте сессии
+- Только если прошло > 7 дней с последнего purge
+- Только если БД > 50 MB ИЛИ tool_outputs > 5000
+
+**Что очищается:**
+- ✅ `tool_outputs` старше 7 дней (большие выводы инструментов)
+- ✅ `compaction_summaries` старше 30 дней
+- ✅ `compaction_keywords` старше 30 дней
+- ✅ `compressed_results` старше 30 дней
+
+**Что НЕ очищается:**
+- ❌ `session_facts` — долгосрочная память (решения, уроки)
+- ❌ `subagent_results` — история работы субагентов
+- ❌ `failures` — память о неудачах
+
+**Пример логов:**
+```
+[pi-sub] 🧹 DB size OK (30.5 MB, 2000 tools), skipping purge
+[pi-sub] 🧹 Running automatic purge (DB: 60.5 MB, 6000 tool outputs)...
+[pi-sub] 🧹 Purged: 5000 tools, 150 summaries, 300 keywords, 50 compressed.
+         DB size: 60.5 MB → 25.3 MB
+```
+
+**Ручной запуск:**
+```bash
+/memory-purge tools=7 facts=30  # Очистить tool_outputs старше 7 дней
+```
+
+### Безопасное закрытие БД
+
+**Принцип:** При завершении сессии БД корректно закрывается для предотвращения повреждения WAL-файла.
+
+**Как работает:**
+```typescript
+pi.on("session_shutdown", async () => {
+  manager.abortAll();
+  manager.dispose();
+  
+  if (memoryDb) {
+    memoryDb.close();
+    console.log(`[pi-sub] 📦 Memory database closed`);
+  }
+});
+```
+
+**Зачем:**
+- Предотвращает повреждение WAL-файла при аварийном завершении
+- Освобождает файловые дескрипторы
+- Гарантирует целостность данных
+
 ### Инжекция в промпт
 
 При запуске субагента:
@@ -668,10 +725,22 @@ pi-sub/
 ├── tools/
 │   └── register-tools.ts       # Переопределение инструментов
 ├── memory/
-│   ├── database.ts             # SQLite + FTS5 (монолитный, ~2000 строк)
+│   ├── database.ts             # Фасад БД (~250 строк)
+│   ├── schema.ts               # Схема БД и миграции (~350 строк)
 │   ├── session-memory.ts       # Извлечение фактов
 │   ├── result-compressor.ts    # Сжатие результатов
-│   └── consolidation.ts        # Auto-Consolidation
+│   ├── consolidation.ts        # Auto-Consolidation
+│   ├── repositories/           # Репозитории для каждой таблицы
+│   │   ├── index.ts            # Экспорты репозиториев
+│   │   ├── tool-outputs.repository.ts      # tool_outputs
+│   │   ├── subagent-results.repository.ts  # subagent_results
+│   │   ├── session-facts.repository.ts     # session_facts
+│   │   ├── compaction.repository.ts        # compaction_summaries + keywords
+│   │   ├── failures.repository.ts          # failures
+│   │   └── compressed-results.repository.ts # compressed_results
+│   └── utils/                  # Утилиты для БД
+│       ├── hash.ts             # Вычисление SHA-256 хэша
+│       └── priority.ts         # Вычисление приоритета (1-10)
 ├── context-tools/
 │   ├── ctx-bash.ts             # bash с сохранением + deduplication + priority
 │   ├── ctx-read.ts             # read с сохранением + deduplication + priority
@@ -732,7 +801,8 @@ onCompact callback
 session_start
     │
     ├── Инициализация Session Memory
-    └── Auto-Consolidation (если session_facts > 1000)
+    ├── Auto-Consolidation (если session_facts > 1000)
+    └── Automatic Purge (если > 50 MB ИЛИ > 5000 tools, раз в неделю)
     │
     ▼
 turn_end (каждые 10 ходов)
@@ -756,6 +826,11 @@ compaction_end (все агенты)
     ├── Генерация detailed_summary + meta
     ├── Сохранение в compaction_summaries
     └── Сохранение keywords в compaction_keywords
+    │
+    ▼
+session_shutdown
+    │
+    └── Закрытие БД (memoryDb.close())
 ```
 
 ### Типы агентов
@@ -816,6 +891,9 @@ sqlite3 .pi/memory/unified.db "SELECT id, approach, error FROM failures ORDER BY
 
 # Дубликаты (по хэшу)
 sqlite3 .pi/memory/unified.db "SELECT content_hash, COUNT(*) as count FROM tool_outputs WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING count > 1;"
+
+# Размер по таблицам
+sqlite3 .pi/memory/unified.db "SELECT name, (page_count * page_size) / 1024.0 / 1024.0 as size_mb FROM pragma_page_count(), pragma_page_size();"
 ```
 
 ### Логи
@@ -823,6 +901,9 @@ sqlite3 .pi/memory/unified.db "SELECT content_hash, COUNT(*) as count FROM tool_
 ```
 [pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Failures: 3, Size: 12.5 MB
 [pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
+[pi-sub] 🧹 DB size OK (30.5 MB, 2000 tools), skipping purge
+[pi-sub] 🧹 Running automatic purge (DB: 60.5 MB, 6000 tool outputs)...
+[pi-sub] 🧹 Purged: 5000 tools, 150 summaries, 300 keywords, 50 compressed. DB size: 60.5 MB → 25.3 MB
 [pi-sub] 🔄 Auto-consolidation triggered (1234 facts)
 [pi-sub] 🔄 Consolidation complete: 15 groups, 45 records merged, 30 records deleted
 [pi-sub] 🎓 Background learning triggered (turn 10)
@@ -839,6 +920,7 @@ sqlite3 .pi/memory/unified.db "SELECT content_hash, COUNT(*) as count FROM tool_
 [pi-sub] 🔑 Saved 13 keywords for compaction 42 (8 files, 3 decisions, 2 lessons)
 [pi-sub] 🔇 Agent abc123: no-inject mode — showing result in UI only
 [pi-sub] ✂️ Truncated large tool output to prevent context overflow
+[pi-sub] 📦 Memory database closed
 ```
 
 ### Тестирование инструментов
@@ -864,6 +946,9 @@ ctx_search "id:1"
 
 # Тест консолидации
 /memory-consolidate --dry-run
+
+# Ручной purge
+/memory-purge tools=7 facts=30
 
 # Тест всех операций
 /memory-test
@@ -923,6 +1008,38 @@ pi.on("tool_call", (event, ctx) => {
 });
 ```
 
+### Добавление нового репозитория
+
+```typescript
+// memory/repositories/my-table.repository.ts
+import type Database from "better-sqlite3";
+
+export interface MyRecord {
+  id: number;
+  data: string;
+  timestamp: number;
+}
+
+export class MyTableRepository {
+  constructor(private db: Database.Database) {}
+
+  save(data: { data: string }): number {
+    const stmt = this.db.prepare(`
+      INSERT INTO my_table (data, timestamp)
+      VALUES (?, ?)
+    `);
+    const result = stmt.run(data.data, Date.now());
+    return Number(result.lastInsertRowid);
+  }
+
+  getById(id: number): MyRecord | undefined {
+    return this.db.prepare(
+      "SELECT * FROM my_table WHERE id = ?"
+    ).get(id) as MyRecord | undefined;
+  }
+}
+```
+
 ---
 
 ## 📦 Зависимости
@@ -949,6 +1066,7 @@ pi.on("tool_call", (event, ctx) => {
 | Фоновые процессы | 5 |
 | Таблицы БД | 7 |
 | FTS5 индексов | 7 |
+| Репозиториев | 6 |
 
 ---
 
@@ -981,3 +1099,6 @@ pi.on("tool_call", (event, ctx) => {
 17. **Background Learning**: Проактивное сохранение фактов каждые 10 ходов
 18. **Correction Detection**: Автоматическое сохранение исправлений пользователя
 19. **Auto-Consolidation**: Слияние похожих записей для уменьшения дубликатов
+20. **Automatic Purge**: Контроль размера БД (раз в неделю, выборочная очистка)
+21. **Безопасное закрытие БД**: memoryDb.close() в session_shutdown
+22. **Модульная архитектура**: database.ts разделён на репозитории и утилиты

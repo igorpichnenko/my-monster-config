@@ -13,6 +13,8 @@
  * Phase 9: Correction Detection — детекция исправлений пользователя
  * Phase 10: Auto-Consolidation — автоматическая консолидация похожих записей
  * Phase 11: Failure Memory — память о неудачах
+ * Phase 12: Deduplication + Priority System
+ * Phase 13: Automatic Purge (weekly, selective)
  */
 
 import { dirname, join } from "node:path";
@@ -387,6 +389,12 @@ export default function (pi: ExtensionAPI) {
   const BACKGROUND_LEARNING_INTERVAL = 10; // каждые 10 ходов
 
   // ==========================================================================
+  // ФАЗА 13: Automatic Purge — timestamp последнего запуска
+  // ==========================================================================
+  const LAST_PURGE_KEY = Symbol.for("pi-sub:lastPurgeTimestamp");
+  const ONE_WEEK_MS = 7 * 24 * 60 * 60 * 1000; // 7 дней
+
+  // ==========================================================================
   // События сессии
   // ==========================================================================
   pi.on("session_start", async (event: any, ctx) => {
@@ -400,6 +408,55 @@ export default function (pi: ExtensionAPI) {
         `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       sessionMemory.setSessionId(newSessionId);
       console.log(`[pi-sub] 🧠 Session ID updated: ${newSessionId}`);
+    }
+
+    // ФАЗА 13: Автоматический purge (раз в неделю, выборочный)
+    if (memoryDb) {
+      const lastPurge = (globalThis as any)[LAST_PURGE_KEY] || 0;
+      const now = Date.now();
+      
+      if (now - lastPurge > ONE_WEEK_MS) {
+        const stats = memoryDb.getStats();
+        
+        // Запускаем purge только если БД > 50 MB ИЛИ > 5000 tool_outputs
+        if (stats.dbSizeMb > 50 || stats.toolOutputs > 5000) {
+          console.log(
+            `[pi-sub] 🧹 Running automatic purge (DB: ${stats.dbSizeMb.toFixed(1)} MB, ` +
+            `${stats.toolOutputs} tool outputs)...`
+          );
+          
+          try {
+            // Очищаем только то, что занимает много места
+            const deletedTools = memoryDb.purgeOldToolOutputs(7);
+            const deletedSummaries = memoryDb.purgeOldCompactionSummaries(30);
+            const deletedKeywords = memoryDb.purgeOldKeywords(30);
+            const deletedCompressed = memoryDb.purgeOldCompressedResults(30);
+            
+            // НЕ очищаем:
+            // - session_facts (долгосрочная память)
+            // - subagent_results (история работы)
+            // - failures (память о неудачах)
+            
+            const statsAfter = memoryDb.getStats();
+            
+            console.log(
+              `[pi-sub] 🧹 Purged: ${deletedTools} tools, ${deletedSummaries} summaries, ` +
+              `${deletedKeywords} keywords, ${deletedCompressed} compressed. ` +
+              `DB size: ${stats.dbSizeMb.toFixed(1)} MB → ${statsAfter.dbSizeMb.toFixed(1)} MB`
+            );
+            
+            // Сохраняем timestamp
+            (globalThis as any)[LAST_PURGE_KEY] = now;
+          } catch (err) {
+            console.error(`[pi-sub] ❌ Automatic purge failed:`, err);
+          }
+        } else {
+          console.log(
+            `[pi-sub] 🧹 DB size OK (${stats.dbSizeMb.toFixed(1)} MB, ` +
+            `${stats.toolOutputs} tools), skipping purge`
+          );
+        }
+      }
     }
 
     // ФАЗА 10: Auto-Consolidation при старте сессии
@@ -423,6 +480,16 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async () => {
     manager.abortAll();
     manager.dispose();
+    
+    // Закрываем БД
+    if (memoryDb) {
+      try {
+        memoryDb.close();
+        console.log(`[pi-sub] 📦 Memory database closed`);
+      } catch (err) {
+        console.error(`[pi-sub] ❌ Failed to close memory database:`, err);
+      }
+    }
   });
 
   pi.on("tool_execution_start", async (_event, ctx) => {
