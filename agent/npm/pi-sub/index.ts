@@ -16,6 +16,7 @@
  * Phase 12: Deduplication + Priority System
  * Phase 13: Automatic Purge (weekly, selective)
  * v11: Project isolation — факты изолированы между проектами
+ * v13: Исправлен backgroundLearningTurnCount — сбрасывается при session_start
  */
 
 import { dirname, join } from "node:path";
@@ -413,6 +414,10 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (event: any, ctx) => {
     widget.setUICtx(ctx.ui as UICtx);
     manager.clearCompleted(true);
+
+    // v13: Сбрасываем счётчик background learning при старте новой сессии
+    // Без этого счётчик рос бесконечно и мог пропустить turn_end события
+    backgroundLearningTurnCount = 0;
 
     // ФАЗА 4A: Обновляем ID сессии при старте новой сессии
     if (sessionMemory) {

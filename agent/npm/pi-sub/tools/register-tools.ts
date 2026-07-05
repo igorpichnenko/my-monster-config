@@ -7,6 +7,11 @@
  * - Добавлена подсказка Ctrl+O для разворачивания результатов
  * - ctx_search поддерживает expanded через Ctrl+O
  * - Phase 12: Улучшена обработка пустых результатов и приоритетов
+ * 
+ * v13: Исправлена SQL injection в grep/find:
+ *      - Добавлена функция escapeShellArg для экранирования shell-метасимволов
+ *      - Паттерн, путь и опции теперь безопасно передаются в shell
+ *      - Защита от атак типа pattern='"; rm -rf /; #'
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -20,6 +25,29 @@ import { executeCtxSearch, type CtxSearchArgs } from "../context-tools/ctx-searc
 
 /** Подсказка для разворачивания результата */
 const EXPAND_HINT = " (Ctrl+O to expand)";
+
+/**
+ * v13: Экранирует аргумент для безопасной передачи в shell.
+ * 
+ * Использует одинарные кавычки — стандартный способ shell escaping.
+ * Работает для bash, sh, zsh. Защищает от инъекций через:
+ * - Двойные кавычки: "
+ * - Обратные кавычки: `
+ * - Переменные: $
+ * - Команды: ; & |
+ * - Перенаправления: < >
+ * - Комментарии: #
+ * - И другие shell-метасимволы
+ * 
+ * Пример:
+ *   escapeShellArg('test"; rm -rf /; #') → "'test\"; rm -rf /; #'"
+ */
+function escapeShellArg(arg: string): string {
+  // Оборачиваем в одинарные кавычки и экранируем одинарные кавычки внутри
+  // 'test' → 'test'
+  // test's → 'test'\''s'
+  return "'" + arg.replace(/'/g, "'\\''") + "'";
+}
 
 /** Общий renderResult для инструментов с сохранением в БД */
 function renderSavedToDb(result: any, { expanded, isPartial }: any, theme: any, label: string) {
@@ -199,7 +227,14 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       try {
         const searchPath = params.path || ".";
         const options = params.options || "-rn";
-        const command = `grep ${options} --exclude-dir=.git "${params.pattern}" ${searchPath} 2>/dev/null || true`;
+        
+        // v13: Экранируем все пользовательские ввод для защиты от shell injection
+        const safePattern = escapeShellArg(params.pattern);
+        const safePath = escapeShellArg(searchPath);
+        const safeOptions = escapeShellArg(options);
+        
+        // Команда использует экранированные аргументы в одинарных кавычках
+        const command = `grep ${safeOptions} --exclude-dir=.git ${safePattern} ${safePath} 2>/dev/null || true`;
         
         const result = await executeCtxBash(
           { command, cwd: process.cwd() } as CtxBashArgs,
@@ -236,7 +271,13 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       try {
         const searchPath = params.path || ".";
         const limit = params.limit || 1000;
-        const command = `find ${searchPath} -not -path '*/.git/*' -name "${params.pattern}" -type f 2>/dev/null | head -n ${limit}`;
+        
+        // v13: Экранируем все пользовательские ввод для защиты от shell injection
+        const safePattern = escapeShellArg(params.pattern);
+        const safePath = escapeShellArg(searchPath);
+        
+        // Команда использует экранированные аргументы в одинарных кавычках
+        const command = `find ${safePath} -not -path '*/.git/*' -name ${safePattern} -type f 2>/dev/null | head -n ${limit}`;
         
         const result = await executeCtxBash(
           { command, cwd: process.cwd() } as CtxBashArgs,
@@ -272,7 +313,12 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
       try {
         const searchPath = params.path || ".";
         const options = params.options || "-la";
-        const command = `ls ${options} ${searchPath}`;
+        
+        // v13: Экранируем для защиты от shell injection
+        const safePath = escapeShellArg(searchPath);
+        const safeOptions = escapeShellArg(options);
+        
+        const command = `ls ${safeOptions} ${safePath}`;
         
         const result = await executeCtxBash(
           { command, cwd: process.cwd() } as CtxBashArgs,
