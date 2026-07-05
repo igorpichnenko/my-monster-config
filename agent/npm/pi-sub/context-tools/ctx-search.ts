@@ -23,6 +23,7 @@
 
 import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword, type FailureRecord } from "../memory/database.js";
 import { priorityEmoji, type Priority } from "../memory/utils/priority.js";
+import { escapeFts5Query } from "../memory/utils/fts-escape.js";
 
 export interface CtxSearchArgs {
   query: string;
@@ -88,7 +89,7 @@ function findSubagentResultById(db: MemoryDatabase, idStr: string): SubagentResu
  * Спецсимволы FTS5: + - * ~ ( ) | & { } ^ "
  * Решение: заменяем их на пробелы и оборачиваем в кавычки для поиска фразы целиком.
  */
-function escapeFts5Query(query: string): string {
+/* function escapeFts5Query(query: string): string {
   // Экранируем все спецсимволы FTS5
   const cleaned = query
     .replace(/"/g, '')                    // убираем кавычки
@@ -103,7 +104,7 @@ function escapeFts5Query(query: string): string {
   
   // Оборачиваем в кавычки для поиска фразы целиком
   return `"${cleaned}"`;
-}
+} */
 
 export function executeCtxSearch(
   args: CtxSearchArgs,

@@ -2,6 +2,8 @@
  * compaction.repository.ts — Репозиторий для compaction_summaries и compaction_keywords.
  * 
  * v11: Добавлен метод getKeywordById для корректного поиска по ID keyword
+ * v13: Добавлен атомарный метод saveSummaryWithKeywords для гарантии
+ *      целостности данных при пакетных операциях
  */
 
 import type Database from "better-sqlite3";
@@ -149,6 +151,50 @@ export class CompactionRepository {
     });
 
     return insertMany(keywords);
+  }
+
+  /**
+   * v13: Атомарное сохранение summary + keywords в одной транзакции.
+   * 
+   * Гарантирует целостность данных:
+   * - Если saveSummary упал — keywords не сохраняются
+   * - Если saveKeywords упал — summary откатывается
+   * - Нет состояния "summary без keywords" или "keywords без summary"
+   * 
+   * @returns Объект с ID компакции и количеством сохранённых keywords
+   */
+  saveSummaryWithKeywords(data: {
+    summary: {
+      sessionId: string;
+      reason: "manual" | "threshold" | "overflow";
+      tokensBefore: number;
+      summary: string;
+      detailedSummary?: string;
+    };
+    keywords: Array<{
+      keyword: string;
+      category: "file" | "decision" | "lesson";
+    }>;
+  }): { compactionId: number; keywordsCount: number } {
+    const transaction = this.db.transaction(() => {
+      // 1. Сохраняем summary
+      const compactionId = this.saveSummary(data.summary);
+      
+      // 2. Сохраняем keywords с привязкой к compactionId
+      const keywordsWithId = data.keywords.map(k => ({
+        compactionId,
+        keyword: k.keyword,
+        category: k.category,
+      }));
+      
+      const keywordsCount = keywordsWithId.length > 0
+        ? this.saveKeywords(keywordsWithId)
+        : 0;
+      
+      return { compactionId, keywordsCount };
+    });
+    
+    return transaction();
   }
 
   /**

@@ -8,6 +8,7 @@
 
 import type Database from "better-sqlite3";
 import { scanForSecrets, redactSecret } from "../../context-tools/utils/secret-scanner.js";
+import { escapeFts5Query } from "../utils/fts-escape.js";
 
 export interface SubagentResult {
   id: string;
@@ -29,7 +30,7 @@ export interface SubagentResult {
  * Спецсимволы FTS5: + - * ~ ( ) | & { } ^ "
  * Решение: заменяем их на пробелы и оборачиваем в кавычки для поиска фразы целиком.
  */
-function escapeFts5Query(query: string): string {
+/* function escapeFts5Query(query: string): string {
   // Экранируем все спецсимволы FTS5
   const cleaned = query
     .replace(/"/g, '')                    // убираем кавычки
@@ -44,7 +45,7 @@ function escapeFts5Query(query: string): string {
   
   // Оборачиваем в кавычки для поиска фразы целиком
   return `"${cleaned}"`;
-}
+} */
 
 export class SubagentResultsRepository {
   constructor(private db: Database.Database) {}

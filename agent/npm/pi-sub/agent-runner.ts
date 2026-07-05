@@ -19,10 +19,11 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import { BUILTIN_TOOL_NAMES, getAgentConfig, getConfig, getToolNamesForType } from "./agent-types.js";
-import { buildParentContext, extractText } from "./context.js";
+import { buildParentContext } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
+import { extractText } from "./context-tools/utils/text-extractor.js";
 
 // ---- ФАЗА 4B: Импорт памяти ----
 import { MemoryDatabase } from "./memory/database.js";

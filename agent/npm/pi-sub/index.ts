@@ -274,41 +274,23 @@ export default function (pi: ExtensionAPI) {
     // ==========================================================================
     // ФАЗА 6: onCompact callback — работает для ВСЕХ агентов (main + subagents)
     // ==========================================================================
-    (record, info) => {
-      // Сохраняем summary компакции в БД (LLM-generated + detailed_summary)
-      // Теперь работает для ВСЕХ агентов благодаря генерации в agent-runner.ts
+   (record, info) => {
       if (memoryDb && info.summary && info.tokensBefore > 0) {
         try {
-          // Сохраняем summary + detailed_summary
-          const compactionId = memoryDb.saveCompactionSummary({
-            sessionId: sessionMemory?.getSessionId() || "unknown",
-            reason: info.reason,
-            tokensBefore: info.tokensBefore,
-            summary: info.summary,
-            detailedSummary: info.detailedSummary || "",  // ← работает для всех
-          });
+          // v13: Собираем keywords БЕЗ compactionId (его ещё нет)
+          // saveSummaryWithKeywords внутри транзакции:
+          // 1. Сохраняет summary → получает compactionId
+          // 2. Сохраняет keywords с этим compactionId
+          // 3. Если что-то упало — откатывает всё
+          const keywordsForSave: Array<{
+            keyword: string;
+            category: "file" | "decision" | "lesson";
+          }> = [];
           
-          console.log(
-            `[pi-sub] 💾 Saved compaction summary (ID: ${compactionId}, ` +
-            `agent: ${record.type || "main"}, ` +
-            `${info.tokensBefore} tokens, ` +
-            `${info.summary.length} chars summary, ` +
-            `${(info.detailedSummary?.length || 0)} chars detailed)`,
-          );
-          
-          // Сохраняем ключевые слова в нормализованную таблицу
-          // Теперь работает для ВСЕХ агентов благодаря meta из agent-runner.ts
           if (info.meta) {
-            const keywords: Array<{
-              compactionId: number;
-              keyword: string;
-              category: "file" | "decision" | "lesson";
-            }> = [];
-            
             // Добавляем файлы
             for (const file of info.meta.keyFiles.slice(0, 10)) {
-              keywords.push({
-                compactionId,
+              keywordsForSave.push({
                 keyword: file,
                 category: "file",
               });
@@ -316,8 +298,7 @@ export default function (pi: ExtensionAPI) {
             
             // Добавляем решения
             for (const decision of info.meta.keyDecisions.slice(0, 5)) {
-              keywords.push({
-                compactionId,
+              keywordsForSave.push({
                 keyword: decision,
                 category: "decision",
               });
@@ -325,21 +306,33 @@ export default function (pi: ExtensionAPI) {
             
             // Добавляем уроки
             for (const lesson of info.meta.keyLessons.slice(0, 5)) {
-              keywords.push({
-                compactionId,
+              keywordsForSave.push({
                 keyword: lesson,
                 category: "lesson",
               });
             }
-            
-            if (keywords.length > 0) {
-              const saved = memoryDb.saveCompactionKeywords(keywords);
-              console.log(
-                `[pi-sub] 🔑 Saved ${saved} keywords for compaction ${compactionId} ` +
-                `(${info.meta.keyFiles.length} files, ${info.meta.keyDecisions.length} decisions, ${info.meta.keyLessons.length} lessons)`
-              );
-            }
           }
+          
+          // v13: Атомарное сохранение summary + keywords в одной транзакции
+          const { compactionId, keywordsCount } = memoryDb.compaction.saveSummaryWithKeywords({
+            summary: {
+              sessionId: sessionMemory?.getSessionId() || "unknown",
+              reason: info.reason,
+              tokensBefore: info.tokensBefore,
+              summary: info.summary,
+              detailedSummary: info.detailedSummary || "",
+            },
+            keywords: keywordsForSave,
+          });
+          
+          console.log(
+            `[pi-sub] 💾 Saved compaction (ID: ${compactionId}, ` +
+            `agent: ${record.type || "main"}, ` +
+            `${info.tokensBefore} tokens, ` +
+            `${info.summary.length} chars summary, ` +
+            `${(info.detailedSummary?.length || 0)} chars detailed, ` +
+            `${keywordsCount} keywords)`
+          );
         } catch (err) {
           console.error(`[pi-sub] Failed to save compaction summary:`, err);
         }

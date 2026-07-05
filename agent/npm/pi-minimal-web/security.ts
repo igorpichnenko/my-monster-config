@@ -1,12 +1,57 @@
+/**
+ * security.ts — SSRF защита и санитизация контента для pi-minimal-web.
+ * 
+ * v13: Улучшена безопасность:
+ *      - Добавлены порты 3000, 5000, 8080, 8443, 9090 в DANGEROUS_PORTS
+ *      - Улучшен Base64 regex — не срабатывает на hex-строках и хэшах
+ *      - Добавлена функция isValidBase64 для проверки истинного Base64
+ */
+
 import { URL } from 'url';
 
 // ═════════════════════════════════════════════════════════════
 // SSRF PROTECTION
 // ═════════════════════════════════════════════════════════════
 
+/**
+ * v13: Расширен список опасных портов.
+ * 
+ * Добавлены порты для внутренних сервисов:
+ * - 3000: Node.js dev server
+ * - 5000: Flask/Python dev server
+ * - 8080: HTTP альтернатива
+ * - 8443: HTTPS альтернатива
+ * - 9090: Prometheus/консоль
+ * - 9300: Elasticsearch transport
+ */
 const DANGEROUS_PORTS = new Set([
-    21, 22, 23, 25, 53, 110, 111, 135, 139, 143, 
-    445, 5432, 3306, 6379, 27017, 9200
+    // Стандартные сервисы
+    21,     // FTP
+    22,     // SSH
+    23,     // Telnet
+    25,     // SMTP
+    53,     // DNS
+    110,    // POP3
+    111,    // RPC
+    135,    // MS RPC
+    139,    // NetBIOS
+    143,    // IMAP
+    445,    // SMB
+    
+    // Базы данных
+    3306,   // MySQL
+    5432,   // PostgreSQL
+    6379,   // Redis
+    9200,   // Elasticsearch HTTP
+    9300,   // Elasticsearch transport
+    27017,  // MongoDB
+    
+    // v13: Внутренние сервисы и dev-серверы
+    3000,   // Node.js dev server (Express, Next.js)
+    5000,   // Flask/Python dev server
+    8080,   // HTTP альтернатива (часто прокси)
+    8443,   // HTTPS альтернатива
+    9090,   // Prometheus, Consul, Go dev
 ]);
 
 const MAX_URL_LENGTH = 2048;
@@ -91,6 +136,33 @@ const INJECTION_PATTERNS = [
     /pretend\s+you\s+are/gi,
 ];
 
+/**
+ * v13: Проверяет, является ли строка истинным Base64.
+ * 
+ * Истинный Base64 содержит:
+ * - Буквы обоих регистров (a-z, A-Z)
+ * - Цифры (0-9)
+ * - Символы +/
+ * - Опциональный padding (=)
+ * 
+ * Это исключает false positive на:
+ * - Git commit hashes (только hex: 0-9, a-f)
+ * - SHA-256 hashes (только hex: 0-9, a-f)
+ * - UUID (содержит дефисы)
+ */
+function isValidBase64(str: string): boolean {
+  // Должно содержать буквы обоих регистров (не только hex)
+  const hasLowerNonHex = /[g-z]/.test(str);
+  const hasUpper = /[A-Z]/.test(str);
+  
+  // Если есть только hex-символы — это скорее хэш, а не Base64
+  if (!hasLowerNonHex && !hasUpper) {
+    return false;
+  }
+  
+  return true;
+}
+
 export function sanitizeContent(content: string): string {
     if (!content) return content;
 
@@ -105,10 +177,16 @@ export function sanitizeContent(content: string): string {
     // 3. Удаление control-символов (кроме \n, \r, \t)
     sanitized = sanitized.replace(/[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]/g, '');
 
-    // 4. Замена Base64 blob'ов (длинные последовательности base64)
+    // 4. v13: Замена Base64 blob'ов — только истинный Base64
+    //    Не заменяем hex-строки (git hashes, SHA-256)
     sanitized = sanitized.replace(
         /[A-Za-z0-9+/]{50,}={0,2}/g,
-        '[BASE64_ENCODED_DATA]'
+        (match) => {
+            if (isValidBase64(match)) {
+                return '[BASE64_ENCODED_DATA]';
+            }
+            return match;  // Оставляем как есть — это не Base64
+        }
     );
 
     // 5. Замена инъекционных паттернов

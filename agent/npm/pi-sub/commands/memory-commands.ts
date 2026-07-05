@@ -7,6 +7,11 @@
  * Phase 10: Auto-Consolidation (/memory-consolidate)
  * Phase 11: Failure Memory (/memory-failures)
  * Phase 12: Subagent Results Viewer (/memory-subagents)
+ * 
+ * v13: Исправлена проблема с /memory-test:
+ *      - Тестовые данные больше не сохраняются в БД
+ *      - Используется транзакция с ROLLBACK для отката всех изменений
+ *      - Тест проверяет функциональность без засорения БД
  */
 
 import type { PiSubContext } from "../types/pi-sub-context.js";
@@ -82,8 +87,9 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
   });
 
   // /memory-test
+  // v13: Использует транзакцию с ROLLBACK — тестовые данные не сохраняются
   pi.registerCommand("memory-test", {
-    description: "Test memory database operations",
+    description: "Test memory database operations (changes are rolled back)",
     handler: async (_args, cmdCtx) => {
       if (!memoryDb) {
         cmdCtx.ui.notify("❌ Memory database not initialized", "error");
@@ -91,88 +97,107 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
       }
 
       const results: string[] = [];
+      const raw = memoryDb.getRaw();
       
       try {
-        const toolId = memoryDb.saveToolOutput({
-          toolName: "bash",
-          args: JSON.stringify({ command: "echo test" }),
-          output: "test output from bash command\nline 2\nline 3",
-          summary: "Test summary: bash command executed",
-        });
-        results.push(`✅ Tool output saved (ID: ${toolId})`);
+        // v13: Начинаем транзакцию — все изменения будут откачены
+        raw.exec("BEGIN TRANSACTION");
         
-        const tool = memoryDb.getToolOutput(toolId);
-        results.push(`✅ Tool output retrieved: ${tool?.tool_name}`);
-        
-        const toolSearch = memoryDb.searchToolOutputs("bash");
-        results.push(`✅ Tool search: ${toolSearch.length} results`);
-        
-        const testAgentId = `test-${Date.now()}`;
-        memoryDb.saveSubagentResult({
-          id: testAgentId,
-          agentType: "general-purpose",
-          description: "Test task from /memory-test",
-          result: "Test result from subagent\nWith multiple lines\nAnd some details",
-          status: "completed",
-          toolUses: 5,
-          durationMs: 12345,
-        });
-        results.push(`✅ Subagent result saved (ID: ${testAgentId})`);
-        
-        const agentResult = memoryDb.getSubagentResult(testAgentId);
-        results.push(`✅ Subagent result retrieved: ${agentResult?.description}`);
-        
-        const factId = memoryDb.saveFact({
-          sessionId: `session-${Date.now()}`,
-          factType: "decision",
-          content: "Test decision: using TypeScript strict mode for all new files",
-        });
-        results.push(`✅ Session fact saved (ID: ${factId})`);
-        
-        const factSearch = memoryDb.searchFacts("TypeScript");
-        results.push(`✅ Fact search: ${factSearch.length} results`);
-        
-        memoryDb.saveCompressedResult("test-hash-123", "compressed text from test");
-        const cached = memoryDb.getCompressedResult("test-hash-123");
-        results.push(`✅ Compressed cache: ${cached === "compressed text from test" ? "OK" : "FAIL"}`);
-        
-        // Тест compaction_keywords
-        const compactionId = memoryDb.saveCompactionSummary({
-          sessionId: `session-${Date.now()}`,
-          reason: "threshold",
-          tokensBefore: 10000,
-          summary: "Test compaction summary",
-          detailedSummary: "## Key Decisions\n1. Test decision",
-        });
-        results.push(`✅ Compaction summary saved (ID: ${compactionId})`);
-        
-        const keywordId = memoryDb.saveCompactionKeyword({
-          compactionId,
-          keyword: "test-decision",
-          category: "decision",
-        });
-        results.push(`✅ Compaction keyword saved (ID: ${keywordId})`);
-        
-        const keywordSearch = memoryDb.searchKeywords("test-decision", 5);
-        results.push(`✅ Keyword search: ${keywordSearch.length} results`);
-        
-        // Тест failures
-        const failureId = memoryDb.saveFailure({
-          sessionId: `session-${Date.now()}`,
-          approach: "Tried to use fs.readFileSync",
-          error: "ENOENT: no such file or directory",
-          reason: "File doesn't exist yet",
-          solution: "Use fs.existsSync check first",
-        });
-        results.push(`✅ Failure saved (ID: ${failureId})`);
-        
-        const failureSearch = memoryDb.searchFailures("ENOENT", 5);
-        results.push(`✅ Failure search: ${failureSearch.length} results`);
-        
-        const stats = memoryDb.getStats();
-        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.failures} failures, ${stats.dbSizeMb.toFixed(2)} MB`);
-        
-        cmdCtx.ui.notify(`🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n💡 Use /memory-stats to see full statistics.`, "info");
+        try {
+          const toolId = memoryDb.saveToolOutput({
+            toolName: "bash",
+            args: JSON.stringify({ command: "echo test" }),
+            output: "test output from bash command\nline 2\nline 3",
+            summary: "Test summary: bash command executed",
+          });
+          results.push(`✅ Tool output saved (ID: ${toolId})`);
+          
+          const tool = memoryDb.getToolOutput(toolId);
+          results.push(`✅ Tool output retrieved: ${tool?.tool_name}`);
+          
+          const toolSearch = memoryDb.searchToolOutputs("bash");
+          results.push(`✅ Tool search: ${toolSearch.length} results`);
+          
+          const testAgentId = `test-${Date.now()}`;
+          memoryDb.saveSubagentResult({
+            id: testAgentId,
+            agentType: "general-purpose",
+            description: "Test task from /memory-test",
+            result: "Test result from subagent\nWith multiple lines\nAnd some details",
+            status: "completed",
+            toolUses: 5,
+            durationMs: 12345,
+          });
+          results.push(`✅ Subagent result saved (ID: ${testAgentId})`);
+          
+          const agentResult = memoryDb.getSubagentResult(testAgentId);
+          results.push(`✅ Subagent result retrieved: ${agentResult?.description}`);
+          
+          const factId = memoryDb.saveFact({
+            sessionId: `session-${Date.now()}`,
+            factType: "decision",
+            content: "Test decision: using TypeScript strict mode for all new files",
+          });
+          results.push(`✅ Session fact saved (ID: ${factId})`);
+          
+          const factSearch = memoryDb.searchFacts("TypeScript");
+          results.push(`✅ Fact search: ${factSearch.length} results`);
+          
+          memoryDb.saveCompressedResult("test-hash-123", "compressed text from test");
+          const cached = memoryDb.getCompressedResult("test-hash-123");
+          results.push(`✅ Compressed cache: ${cached === "compressed text from test" ? "OK" : "FAIL"}`);
+          
+          // v13: Используем атомарный метод saveSummaryWithKeywords
+          const { compactionId, keywordsCount } = memoryDb.compaction.saveSummaryWithKeywords({
+            summary: {
+              sessionId: `session-${Date.now()}`,
+              reason: "threshold",
+              tokensBefore: 10000,
+              summary: "Test compaction summary",
+              detailedSummary: "## Key Decisions\n1. Test decision",
+            },
+            keywords: [
+              { keyword: "test-decision", category: "decision" },
+              { keyword: "test-file.ts", category: "file" },
+              { keyword: "test-lesson", category: "lesson" },
+            ],
+          });
+          results.push(`✅ Compaction summary saved (ID: ${compactionId})`);
+          results.push(`✅ Compaction keywords saved (${keywordsCount} keywords)`);
+          
+          const keywordSearch = memoryDb.searchKeywords("test-decision", 5);
+          results.push(`✅ Keyword search: ${keywordSearch.length} results`);
+          
+          // Тест failures
+          const failureId = memoryDb.saveFailure({
+            sessionId: `session-${Date.now()}`,
+            approach: "Tried to use fs.readFileSync",
+            error: "ENOENT: no such file or directory",
+            reason: "File doesn't exist yet",
+            solution: "Use fs.existsSync check first",
+          });
+          results.push(`✅ Failure saved (ID: ${failureId})`);
+          
+          const failureSearch = memoryDb.searchFailures("ENOENT", 5);
+          results.push(`✅ Failure search: ${failureSearch.length} results`);
+          
+          const stats = memoryDb.getStats();
+          results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.failures} failures, ${stats.dbSizeMb.toFixed(2)} MB`);
+          
+          // v13: Откатываем все изменения — тестовые данные не сохраняются
+          raw.exec("ROLLBACK");
+          
+          cmdCtx.ui.notify(
+            `🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n` +
+            `💡 All test data was rolled back — no changes saved to DB.\n` +
+            `💡 Use /memory-stats to see full statistics.`,
+            "info"
+          );
+        } catch (innerErr) {
+          // Если произошла ошибка внутри транзакции — откатываем
+          raw.exec("ROLLBACK");
+          throw innerErr;
+        }
       } catch (err) {
         results.push(`❌ Error: ${err instanceof Error ? err.message : String(err)}`);
         cmdCtx.ui.notify(`❌ Test failed:\n\n${results.join("\n")}`, "error");
@@ -322,7 +347,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           lines.push(``);
         }
 
-        // НОВОЕ: поиск по failures
+        // Поиск по failures
         const failureResults = memoryDb.searchFailures(query, 5);
         if (failureResults.length > 0) {
           lines.push(`⚠️ Failures (${failureResults.length}):`);
@@ -707,7 +732,9 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
       }
 
       try {
-        const result = consolidateMemory(memoryDb, { threshold, dryRun });
+        // v11: Передаём projectPath для изоляции между проектами
+        const projectRoot = sessionMemory?.getProjectPath() || undefined;
+        const result = consolidateMemory(memoryDb, { threshold, dryRun, projectPath });
         
         const lines = [
           `🔄 Memory Consolidation ${dryRun ? '(DRY RUN)' : ''}`,
