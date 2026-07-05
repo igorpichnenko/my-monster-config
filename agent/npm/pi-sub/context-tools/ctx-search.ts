@@ -17,7 +17,8 @@
  * Phase 12: Priority-based sorting
  * v9: Исправлена обработка строковых ID для subagent_results
  * v9.1: Добавлена поддержка укороченных UUID
- * v9.2: Добавлен поиск по failures (CRITICAL FIX)
+ * v9.2: Добавлен поиск по failures
+ * v12: Исправлено экранирование FTS5 и поиск по keyword ID
  */
 
 import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword, type FailureRecord } from "../memory/database.js";
@@ -76,6 +77,32 @@ function findSubagentResultById(db: MemoryDatabase, idStr: string): SubagentResu
   `).all(`${idStr}%`) as SubagentResult[];
   
   return rows[0] || null;
+}
+
+/**
+ * Экранирует запрос для FTS5 MATCH.
+ * 
+ * v12: Исправлено — теперь экранирует ВСЕ спецсимволы FTS5,
+ *      а не только двойные кавычки.
+ * 
+ * Спецсимволы FTS5: + - * ~ ( ) | & { } ^ "
+ * Решение: заменяем их на пробелы и оборачиваем в кавычки для поиска фразы целиком.
+ */
+function escapeFts5Query(query: string): string {
+  // Экранируем все спецсимволы FTS5
+  const cleaned = query
+    .replace(/"/g, '')                    // убираем кавычки
+    .replace(/[+\-*~()|&{}^]/g, ' ')     // заменяем спецсимволы на пробелы
+    .replace(/\s+/g, ' ')                 // убираем множественные пробелы
+    .trim();
+  
+  // Если после очистки ничего не осталось — возвращаем пустой запрос
+  if (!cleaned) {
+    return '""';
+  }
+  
+  // Оборачиваем в кавычки для поиска фразы целиком
+  return `"${cleaned}"`;
 }
 
 export function executeCtxSearch(
@@ -180,15 +207,15 @@ export function executeCtxSearch(
       return result;
     }
     
-    // 6. Ищем в compaction_keywords (по keyword ID)
-    const keywords = db.getCompactionKeywords(id);
-    if (keywords.length > 0) {
-      const compactionId = keywords[0].compaction_id;
-      const compaction = db.getCompactionSummaryById(compactionId);
+    // 6. Ищем в compaction_keywords по ID keyword — v12 fix
+    // Используем getKeywordById вместо getCompactionKeywords для корректного поиска
+    const keyword = db.getKeywordById(id);
+    if (keyword) {
+      const compaction = db.getCompactionSummaryById(keyword.compaction_id);
       
       if (compaction) {
         let result = `━━━ Compaction Summary [ID: ${compaction.id}] ━━━\n`;
-        result += `(Found via keyword ID: ${id})\n\n`;
+        result += `(Found via keyword ID: ${id}, keyword: "${keyword.keyword}")\n\n`;
         result += `Reason: ${compaction.reason}\n`;
         result += `Tokens before: ${compaction.tokens_before}\n`;
         result += `Date: ${new Date(compaction.timestamp).toLocaleString()}\n\n`;
@@ -198,13 +225,15 @@ export function executeCtxSearch(
           result += `## Detailed Summary\n${compaction.detailed_summary}\n\n`;
         }
         
+        // Показываем все keywords этой компакции
+        const allKeywords = db.getCompactionKeywords(compaction.id);
         const byCategory: Record<string, string[]> = {
           file: [],
           decision: [],
           lesson: [],
         };
         
-        for (const kw of keywords) {
+        for (const kw of allKeywords) {
           byCategory[kw.category].push(kw.keyword);
         }
         
@@ -228,10 +257,13 @@ export function executeCtxSearch(
   
   // Объединённый поиск по всем таблицам с FTS5
   try {
+    // v12: Экранируем запрос для FTS5
+    const escapedQuery = escapeFts5Query(query);
+    
     const allResults: SearchResult[] = [];
     
     // 1. Tool outputs — уже отсортированы по priority DESC, timestamp DESC
-    const toolResults = db.searchToolOutputs(query, limit);
+    const toolResults = db.searchToolOutputs(escapedQuery, limit);
     for (const r of toolResults) {
       const emoji = priorityEmoji(r.priority as Priority);
       allResults.push({
@@ -250,7 +282,7 @@ export function executeCtxSearch(
     }
     
     // 2. Subagent results
-    const subagentResults = db.searchSubagentResults(query, limit);
+    const subagentResults = db.searchSubagentResults(escapedQuery, limit);
     for (const r of subagentResults) {
       allResults.push({
         type: "subagent_result",
@@ -263,7 +295,7 @@ export function executeCtxSearch(
     }
     
     // 3. Session facts
-    const factResults = db.searchFacts(query, limit);
+    const factResults = db.searchFacts(escapedQuery, limit);
     for (const r of factResults) {
       allResults.push({
         type: "session_fact",
@@ -276,7 +308,7 @@ export function executeCtxSearch(
     }
     
     // 4. Compaction summaries
-    const compactionResults = db.searchCompactionSummaries(query, limit);
+    const compactionResults = db.searchCompactionSummaries(escapedQuery, limit);
     for (const r of compactionResults) {
       const preview = r.detailed_summary?.slice(0, 500) || r.summary?.slice(0, 300) || "";
       
@@ -291,7 +323,7 @@ export function executeCtxSearch(
     }
     
     // 5. Compressed results
-    const compressedResults = db.searchCompressedResults(query, limit);
+    const compressedResults = db.searchCompressedResults(escapedQuery, limit);
     for (const r of compressedResults) {
       allResults.push({
         type: "compressed_result",
@@ -304,7 +336,7 @@ export function executeCtxSearch(
     }
     
     // 6. Compaction keywords — группируем по compaction_id
-    const keywordResults = db.searchKeywords(query, limit * 3);
+    const keywordResults = db.searchKeywords(escapedQuery, limit * 3);
     
     const groupedKeywords = new Map<number, {
       keywords: typeof keywordResults;
@@ -362,7 +394,7 @@ export function executeCtxSearch(
     }
     
     // 7. Failures (неудачные подходы) — v9.2 fix
-    const failureResults = db.searchFailures(query, limit);
+    const failureResults = db.searchFailures(escapedQuery, limit);
     for (const r of failureResults) {
       allResults.push({
         type: "failure_record",

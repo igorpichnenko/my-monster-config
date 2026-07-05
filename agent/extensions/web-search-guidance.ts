@@ -13,7 +13,7 @@ Best practices:
 `;
 
 const GUIDANCE_FETCH_CONTENT_INITIAL = (maxLength: number) => `
-⚠️ fetch_content: ты вызвал с maxLength=${maxLength}, но это слишком много.
+⚠️ web_get: ты вызвал с maxLength=${maxLength}, но это слишком много.
 
 Best practices:
 - Начинай с maxLength: 1000
@@ -24,29 +24,29 @@ Best practices:
 - X = Y → весь контент получен, НЕ нужно больше вызовов
 - X < Y → есть ещё контент, используй offset: X
 
-ПОВТОРИ вызов fetch_content с maxLength: 1000
+ПОВТОРИ вызов web_get с maxLength: 1000
 `;
 
 const GUIDANCE_FETCH_CONTENT_OFFSET = (maxLength: number, offset?: number) => `
-⚠️ fetch_content: ты вызвал с maxLength=${maxLength}${offset ? `, offset=${offset}` : ""}, но это неправильный подход.
+⚠️ web_get: ты вызвал с maxLength=${maxLength}${offset ? `, offset=${offset}` : ""}, но это неправильный подход.
 
 Если контент обрезан (видишь "X/Y chars shown" где X < Y), НЕ увеличивай maxLength!
 Вместо этого используй offset для чтения следующих чанков:
 
 Пример:
-1. fetch_content({url: "...", maxLength: 1000}) → получил (1000/5000) — есть ещё контент
-2. fetch_content({url: "...", maxLength: 1000, offset: 1000}) → получил следующие 1000 символов
-3. fetch_content({url: "...", maxLength: 1000, offset: 2000}) → продолжение
+1. web_get({url: "...", maxLength: 1000}) → получил (1000/5000) — есть ещё контент
+2. web_get({url: "...", maxLength: 1000, offset: 1000}) → получил следующие 1000 символов
+3. web_get({url: "...", maxLength: 1000, offset: 2000}) → продолжение
 
 ПОНЯТИЕ "(X/Y) chars shown":
 - X = Y → весь контент получен, НЕ нужно больше вызовов
 - X < Y → есть ещё контент, используй offset: X
 
-ПОВТОРИ вызов fetch_content с maxLength: 1000 и правильным offset
+ПОВТОРИ вызов web_get с maxLength: 1000 и правильным offset
 `;
 
 const GUIDANCE_FETCH_CONTENT_NO_MORE = (offset: number) => `
-⚠️ fetch_content: ты вызвал с offset=${offset}, но в предыдущем вызове ты получил ВЕСЬ контент.
+⚠️ web_get: ты вызвал с offset=${offset}, но в предыдущем вызове ты получил ВЕСЬ контент.
 
 Если ты видишь "(X/X) chars shown" где числа одинаковые — это означает, что весь контент получен.
 НЕ нужно использовать offset или увеличивать maxLength.
@@ -115,19 +115,19 @@ export default function (pi: ExtensionAPI) {
       }
     }
     
-    if (event.toolName === "fetch_content") {
+    if (event.toolName === "web_get") {
       const maxLength = (event.input as any)?.maxLength ?? 1000;
       const offset = (event.input as any)?.offset ?? 0;
       
-      const state = warnedTools.get("fetch_content") ?? { count: 0, consecutiveCorrectCalls: 0 };
+      const state = warnedTools.get("web_get") ?? { count: 0, consecutiveCorrectCalls: 0 };
       
       // Детектор: модель использует offset, но предыдущий вызов вернул весь контент
       if (offset > 0 && state.lastReturnedLength !== undefined && state.lastTotalLength !== undefined) {
         if (state.lastReturnedLength >= state.lastTotalLength) {
           state.count++;
-          warnedTools.set("fetch_content", state);
+          warnedTools.set("web_get", state);
           
-          ctx.ui.notify(`⚠️ fetch_content: offset=${offset}, но весь контент уже получен!`, "warning");
+          ctx.ui.notify(`⚠️ web_get: offset=${offset}, но весь контент уже получен!`, "warning");
           
           pi.sendMessage(
             {
@@ -145,7 +145,7 @@ export default function (pi: ExtensionAPI) {
       // Правильный вызов
       if (maxLength <= 1000) {
         state.consecutiveCorrectCalls++;
-        warnedTools.set("fetch_content", state);
+        warnedTools.set("web_get", state);
         
         // Автообучение: если 3+ правильных вызовов подряд — отключаем проверки
         if (state.consecutiveCorrectCalls >= CORRECT_CALLS_THRESHOLD) {
@@ -162,9 +162,9 @@ export default function (pi: ExtensionAPI) {
         state.count++;
         state.lastMaxLength = maxLength;
         state.lastOffset = offset;
-        warnedTools.set("fetch_content", state);
+        warnedTools.set("web_get", state);
         
-        ctx.ui.notify(`⚠️ fetch_content: maxLength=${maxLength} → используй offset, не увеличивай maxLength!`, "warning");
+        ctx.ui.notify(`⚠️ web_get: maxLength=${maxLength} → используй offset, не увеличивай maxLength!`, "warning");
         
         pi.sendMessage(
           {
@@ -183,9 +183,9 @@ export default function (pi: ExtensionAPI) {
         state.count++;
         state.lastMaxLength = maxLength;
         state.lastOffset = offset;
-        warnedTools.set("fetch_content", state);
+        warnedTools.set("web_get", state);
         
-        ctx.ui.notify(`⚠️ fetch_content: maxLength=${maxLength} → блокирую, используй 1000`, "warning");
+        ctx.ui.notify(`⚠️ web_get: maxLength=${maxLength} → блокирую, используй 1000`, "warning");
         
         pi.sendMessage(
           {
@@ -203,13 +203,13 @@ export default function (pi: ExtensionAPI) {
 
   // Отслеживаем результаты вызовов
   pi.on("tool_result", (event, _ctx) => {
-    if (event.toolName === "fetch_content" && event.result?.details) {
+    if (event.toolName === "web_get" && event.result?.details) {
       const details = event.result.details as any;
-      const state = warnedTools.get("fetch_content") ?? { count: 0, consecutiveCorrectCalls: 0 };
+      const state = warnedTools.get("web_get") ?? { count: 0, consecutiveCorrectCalls: 0 };
       
       state.lastReturnedLength = details.returnedLength;
       state.lastTotalLength = details.totalLength;
-      warnedTools.set("fetch_content", state);
+      warnedTools.set("web_get", state);
     }
   });
 

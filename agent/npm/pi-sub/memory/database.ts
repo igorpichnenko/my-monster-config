@@ -5,6 +5,7 @@
  * для обратной совместимости.
  * 
  * v11: Singleton адаптируется к смене проекта, автоматически пересоздаётся
+ *      Добавлен getKeywordById для поиска по ID keyword
  */
 
 import Database from "better-sqlite3";
@@ -280,6 +281,14 @@ getFactsByProject(projectPath: string, limit: number = 10000) {
 
   getCompactionKeywords(compactionId: number) {
     return this.compaction.getKeywords(compactionId);
+  }
+
+  /**
+   * v11: Получить keyword по его ID (первичный ключ).
+   * Используется в ctx-search.ts для поиска по id:<keyword_id>.
+   */
+  getKeywordById(id: number) {
+    return this.compaction.getKeywordById(id);
   }
 
   searchKeywords(query: string, limit: number = 10) {

@@ -243,7 +243,7 @@ export default function (pi: ExtensionAPI) {
                 }
 
                 if (offset === 0) {
-                    output += `\n💡 To read a page, call fetch_content with:\n`;
+                    output += `\n💡 To read a page, call web_get with:\n`;
                     output += `   url: "<url_from_list_above>"\n`;
                     output += `   maxLength: 1000\n`;
                 }
@@ -314,9 +314,9 @@ export default function (pi: ExtensionAPI) {
     // FETCH CONTENT
     // ═════════════════════════════════════════════════════════
     pi.registerTool({
-        name: "fetch_content",
+        name: "web_get",
         label: "Fetch Content",
-        promptSnippet: `Fetch URL as markdown. fetch_content({url, maxLength, offset})`,
+        promptSnippet: `Fetch URL as markdown. web_get({url, maxLength, offset})`,
         parameters: Type.Object({
             url: Type.String(),
             maxLength: Type.Optional(Type.Number()),
@@ -413,7 +413,7 @@ export default function (pi: ExtensionAPI) {
                 if (hasMore) {
                     const remainingChars = totalLength - newOffset;
                     output += `\n📖 More: ${remainingChars} chars remaining\n`;
-                    output += `💡 To read more, call fetch_content with:\n`;
+                    output += `💡 To read more, call web_get with:\n`;
                     output += `   url: "${url}"\n`;
                     output += `   maxLength: ${maxLength}\n`;
                     output += `   offset: ${newOffset}\n`;

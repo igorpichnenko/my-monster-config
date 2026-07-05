@@ -1,5 +1,7 @@
 /**
  * compaction.repository.ts — Репозиторий для compaction_summaries и compaction_keywords.
+ * 
+ * v11: Добавлен метод getKeywordById для корректного поиска по ID keyword
  */
 
 import type Database from "better-sqlite3";
@@ -149,6 +151,22 @@ export class CompactionRepository {
     return insertMany(keywords);
   }
 
+  /**
+   * Получить keyword по его ID (первичный ключ).
+   * 
+   * v11: Добавлен для корректного поиска в ctx-search.ts
+   */
+  getKeywordById(id: number): CompactionKeyword | undefined {
+    return this.db.prepare(
+      "SELECT * FROM compaction_keywords WHERE id = ?"
+    ).get(id) as CompactionKeyword | undefined;
+  }
+
+  /**
+   * Получить все keywords для конкретной компакции.
+   * 
+   * Примечание: Параметр — это compaction_id, а не keyword id!
+   */
   getKeywords(compactionId: number): CompactionKeyword[] {
     return this.db.prepare(`
       SELECT * FROM compaction_keywords

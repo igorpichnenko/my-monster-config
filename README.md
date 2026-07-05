@@ -12,7 +12,7 @@
 |------------|------------|--------|
 | **pi-sub** | Система субагентов с долгосрочной памятью, контекстным сохранением и оптимизацией | ✅ Активно |
 | **loop-police** | Защита от зацикливания агентов (character/semantic/tool loops) | ✅ Активно |
-| **pi-minimal-web** | Веб-инструменты (web_search, fetch_content) через Exa API | ✅ Активно |
+| **pi-minimal-web** | Веб-инструменты (web_search, web_get) через Exa API | ✅ Активно |
 | **web-search-guidance** | Автообучение модели правильному использованию веб-инструментов | ✅ Активно |
 | **add_context** | Ручная отправка контекста модели | ✅ Активно |
 
@@ -124,7 +124,7 @@ my-monster-config/
 │   ├── extract.ts                   # Извлечение контента
 │   └── tools/
 │       ├── web-search.ts            # web_search инструмент
-│       └── fetch-content.ts         # fetch_content инструмент
+│       └── web-get.ts               # web_get инструмент
 │
 └── extensions/                      # Дополнительные расширения
     ├── add_context.ts               # /add_context команда
@@ -218,10 +218,10 @@ web_search({ query: "pi coding agent", numResults: 3 })
 - `offset`: смещение для пагинации
 - **Валидация**: web-search-guidance ограничивает numResults ≤ 2
 
-#### `fetch_content`
+#### `web_get`
 
 ```typescript
-fetch_content({ url: "https://example.com", maxLength: 2000 })
+web_get({ url: "https://example.com", maxLength: 2000 })
 ```
 
 - Получение содержимого URL как markdown
@@ -413,7 +413,7 @@ edit({
 |---------|----------|
 | `agent_start` | Сброс предупреждений |
 | `tool_call` | Валидация web_search (numResults ≤ 2) |
-| `tool_call` | Валидация fetch_content (maxLength ≤ 1000, offset) |
+| `tool_call` | Валидация web_get (maxLength ≤ 1000, offset) |
 | `tool_result` | Обновление состояния для детекции offset |
 
 **Автообучение:** Если модель 3+ раза подряд правильно использует инструмент — проверки отключаются.
@@ -1069,12 +1069,12 @@ web_search({
 - `numResults` ограничивается ≤ 2 (по умолчанию)
 - После 3+ правильных вызовов проверки отключаются
 
-### fetch_content
+### web_get
 
 Получение содержимого URL как markdown:
 
 ```typescript
-fetch_content({ 
+web_get({ 
   url: "https://example.com", 
   maxLength: 2000,
   offset: 0 
@@ -1116,23 +1116,23 @@ web_search({ query: "test", numResults: 2 })
 // → Успешный вызов
 ```
 
-### Валидация fetch_content
+### Валидация web_get
 
 ```typescript
 // ❌ Неправильно (maxLength > 1000 без offset)
-fetch_content({ url: "https://example.com", maxLength: 5000 })
+web_get({ url: "https://example.com", maxLength: 5000 })
 // → Блокировка + предупреждение
 
 // ✅ Правильно (maxLength ≤ 1000)
-fetch_content({ url: "https://example.com", maxLength: 1000 })
+web_get({ url: "https://example.com", maxLength: 1000 })
 // → Успешный вызов
 
 // ❌ Неправильно (offset > 0, но весь контент уже получен)
-fetch_content({ url: "https://example.com", offset: 1000 })
+web_get({ url: "https://example.com", offset: 1000 })
 // → Блокировка + предупреждение
 
 // ✅ Правильно (offset используется корректно)
-fetch_content({ url: "https://example.com", offset: 1000, maxLength: 1000 })
+web_get({ url: "https://example.com", offset: 1000, maxLength: 1000 })
 // → Успешный вызов
 ```
 
@@ -1220,7 +1220,7 @@ pi-sub создаёт субагента
 Субагент работает:
     ├── read("package.json") → pi-sub сохраняет в БД
     ├── web_search("TypeScript") → web-search-guidance валидирует
-    ├── fetch_content(url) → pi-minimal-web получает контент
+    ├── web_get(url) → pi-minimal-web получает контент
     └── bash("npm test") → pi-sub сохраняет в БД
     │
     ▼
@@ -1420,7 +1420,7 @@ sqlite3 .pi/memory/unified.db "SELECT name, (page_count * page_size) / 1024.0 / 
 [pi-minimal-web] 🌐 Fetching: https://example.com
 [pi-minimal-web] ✅ Fetched 1500 chars
 [web-search-guidance] ⚠️ web_search blocked: numResults=5 > 2
-[web-search-guidance] ⚠️ fetch_content blocked: maxLength=5000 > 1000
+[web-search-guidance] ⚠️ web_get blocked: maxLength=5000 > 1000
 [web-search-guidance] ✅ Model learned: 3 correct calls in a row, disabling validation
 ```
 
@@ -1473,7 +1473,7 @@ ctx_search "id:28622e05-cd3b-492"
 web_search "pi coding agent"
 
 # Получение контента
-fetch_content "https://example.com"
+web_get "https://example.com"
 
 # v11: Тест Project Isolation
 # 1. Запустить pi в проекте A
@@ -1590,7 +1590,7 @@ export class MyTableRepository {
 |-----------|------------|
 | Расширения | 5 |
 | Переопределённые инструменты | 5 (bash, read, grep, find, ls) |
-| Новые инструменты | 3 (ctx_search, web_search, fetch_content) |
+| Новые инструменты | 3 (ctx_search, web_search, web_get) |
 | Команды pi-sub | 17 |
 | Команды loop-police | 1 |
 | Команды extensions | 1 |

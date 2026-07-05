@@ -2,6 +2,7 @@
  * session-facts.repository.ts — Репозиторий для session_facts.
  * 
  * v11: Добавлена поддержка project_path для изоляции между проектами
+ * v12: searchLike теперь использует FTS5 вместо LIKE (быстрее для больших таблиц)
  */
 
 import type Database from "better-sqlite3";
@@ -75,23 +76,44 @@ export class SessionFactsRepository {
     `).all(query, limit) as SessionFact[];
   }
 
+  /**
+   * Поиск похожих фактов по паттерну.
+   * 
+   * v12: Использует FTS5 вместо LIKE для лучшей производительности.
+   *      LIKE с %keyword% не использует индекс и медленный для больших таблиц.
+   *      FTS5 использует инвертированный индекс и быстрый.
+   */
   searchLike(pattern: string, limit: number = 10, projectPath?: string | null): SessionFact[] {
-    if (projectPath) {
-      return this.db.prepare(`
-        SELECT * FROM session_facts
-        WHERE content LIKE ?
-          AND (project_path = ? OR project_path IS NULL)
-        ORDER BY timestamp DESC
-        LIMIT ?
-      `).all(pattern, projectPath, limit) as SessionFact[];
+    // Извлекаем ключевые слова из паттерна
+    const keywords = pattern
+      .replace(/%/g, '')           // убираем %
+      .replace(/\s+/g, ' ')        // нормализуем пробелы
+      .trim()
+      .split(' ')
+      .filter(w => w.length >= 3); // только слова от 3 символов
+    
+    if (keywords.length === 0) {
+      return [];
     }
     
-    return this.db.prepare(`
-      SELECT * FROM session_facts
-      WHERE content LIKE ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `).all(pattern, limit) as SessionFact[];
+    // Используем FTS5 для каждого ключевого слова
+    const allResults = new Map<number, SessionFact>();
+    
+    for (const keyword of keywords) {
+      if (allResults.size >= limit) break;
+      
+      try {
+        const results = this.search(keyword, limit, projectPath);
+        for (const fact of results) {
+          if (allResults.size >= limit) break;
+          allResults.set(fact.id, fact);
+        }
+      } catch (err) {
+        // Игнорируем ошибки FTS5 (например, для спецсимволов)
+      }
+    }
+    
+    return Array.from(allResults.values()).slice(0, limit);
   }
 
   getRecent(limit: number = 20, projectPath?: string | null): SessionFact[] {
@@ -144,7 +166,7 @@ getByProject(projectPath: string, limit: number = 10000): SessionFact[] {
     ORDER BY timestamp DESC
     LIMIT ?
   `).all(projectPath, limit) as SessionFact[];
-}
+  }
 
   /**
    * Получить все уникальные project_path (для отладки).
