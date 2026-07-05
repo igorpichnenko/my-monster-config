@@ -1,28 +1,134 @@
-# Pi-Sub: Система субагентов с долгосрочной памятью
+# my-monster-config
 
-> Расширение для pi-coding-agent, реализующее систему субагентов, контекстную память и оптимизацию вывода инструментов.
+> Коллекция расширений для pi-coding-agent: система субагентов с долгосрочной памятью, защита от зацикливания и веб-инструменты.
+
+**Репозиторий:** https://github.com/igorpichnenko/my-monster-config
 
 ---
 
-## 🎯 Что даёт pi-sub
+## 📦 Что входит в конфиг
+
+| Расширение | Назначение | Статус |
+|------------|------------|--------|
+| **pi-sub** | Система субагентов с долгосрочной памятью, контекстным сохранением и оптимизацией | ✅ Активно |
+| **loop-police** | Защита от зацикливания агентов (character/semantic/tool loops) | ✅ Активно |
+| **pi-minimal-web** | Веб-инструменты (web_search, fetch_content) через Exa API | ✅ Активно |
+| **web-search-guidance** | Автообучение модели правильному использованию веб-инструментов | ✅ Активно |
+| **add_context** | Ручная отправка контекста модели | ✅ Активно |
+
+---
+
+## 🎯 Что даёт my-monster-config
 
 | Проблема | Решение | Результат |
 |----------|---------|-----------|
-| **Переполнение контекста** | Большие выводы (>5000 символов) сохраняются в БД | ✅ Контекст остаётся компактным |
-| **Потеря информации** | Все выводы индексируются в SQLite + FTS5 | ✅ Поиск через `ctx_search` |
-| **Долгие задачи** | Субагенты выполняются в фоне | ✅ Параллельная работа |
-| **Забывание между сессиями** | Автоматическое извлечение фактов | ✅ Модель помнит контекст |
-| **Зацикливание агентов** | Loop-police детектит повторы | ✅ Экономия токенов |
-| **Огромный system prompt** | Кастомный промпт (~300 токенов) | ✅ Быстрый первый ответ |
-| **Потеря данных субагентов** | Compact сохраняется для всех агентов | ✅ Полная история работы |
-| **Дубликаты в БД** | Deduplication через SHA-256 хэш | ✅ Экономия места в БД |
-| **Низкое качество поиска** | Priority System (1-10) | ✅ Важные результаты выше |
-| **Повторение ошибок** | Failure Memory | ✅ Модель учится на ошибках |
-| **Утечка секретов** | Secret Scanning (API keys, tokens) | ✅ Автоматическая маскировка |
-| **Пропуск важных фактов** | Background Learning (каждые 10 ходов) | ✅ Проактивное сохранение |
-| **Игнорирование исправлений** | Correction Detection | ✅ Модель запоминает правки |
-| **Рост БД** | Automatic Purge (раз в неделю) | ✅ Контроль размера БД |
-| **Повреждение WAL** | memoryDb.close() в session_shutdown | ✅ Безопасное закрытие БД |
+| **Переполнение контекста** | Большие выводы (>5000 символов) сохраняются в БД (pi-sub) | ✅ Контекст остаётся компактным |
+| **Потеря информации** | Все выводы индексируются в SQLite + FTS5 (pi-sub) | ✅ Поиск через `ctx_search` |
+| **Долгие задачи** | Субагенты выполняются в фоне (pi-sub) | ✅ Параллельная работа |
+| **Забывание между сессиями** | Автоматическое извлечение фактов (pi-sub) | ✅ Модель помнит контекст |
+| **Зацикливание агентов** | Loop-police детектит повторы (loop-police) | ✅ Экономия токенов |
+| **Огромный system prompt** | Кастомный промпт (~300 токенов) (pi-sub) | ✅ Быстрый первый ответ |
+| **Потеря данных субагентов** | Compact сохраняется для всех агентов (pi-sub) | ✅ Полная история работы |
+| **Дубликаты в БД** | Deduplication через SHA-256 хэш (pi-sub) | ✅ Экономия места в БД |
+| **Низкое качество поиска** | Priority System (1-10) (pi-sub) | ✅ Важные результаты выше |
+| **Повторение ошибок** | Failure Memory (pi-sub) | ✅ Модель учится на ошибках |
+| **Утечка секретов** | Secret Scanning (pi-sub) | ✅ Автоматическая маскировка |
+| **Пропуск важных фактов** | Background Learning каждые 10 ходов (pi-sub) | ✅ Проактивное сохранение |
+| **Игнорирование исправлений** | Correction Detection (pi-sub) | ✅ Модель запоминает правки |
+| **Рост БД** | Automatic Purge раз в неделю (pi-sub) | ✅ Контроль размера БД |
+| **Повреждение WAL** | memoryDb.close() в session_shutdown (pi-sub) | ✅ Безопасное закрытие БД |
+| **Нет доступа к интернету** | web_search через Exa API (pi-minimal-web) | ✅ Модель ищет в интернете |
+| **Неправильное использование web** | Автообучение модели (web-search-guidance) | ✅ Меньше ошибок |
+
+---
+
+## 🚀 Установка
+
+```bash
+# 1. Клонировать репозиторий
+cd ~/.pi/agent/npm
+git clone https://github.com/igorpichnenko/my-monster-config.git
+cd my-monoster-config
+
+# 2. Установить зависимости
+npm install
+
+# 3. Перезапустить pi
+/reload
+```
+
+### Структура проекта
+
+```
+my-monster-config/
+├── README.md
+├── package.json
+├── tsconfig.json
+│
+├── pi-sub/                          # Система субагентов с памятью
+│   ├── index.ts                     # Точка входа, инициализация
+│   ├── agent-manager.ts             # Управление жизненным циклом
+│   ├── agent-runner.ts              # Ядро выполнения
+│   ├── agent-types.ts               # Реестр типов агентов
+│   ├── custom-agents.ts             # Загрузка из .pi/agents/
+│   ├── default-agents.ts            # Встроенные агенты
+│   ├── prompts.ts                   # Сборка системных промптов
+│   ├── commands/
+│   │   ├── agent-commands.ts        # /agent-* команды
+│   │   ├── memory-commands.ts       # /memory-* команды
+│   │   └── agents-menu.ts           # /agents
+│   ├── tools/
+│   │   └── register-tools.ts        # Переопределение инструментов
+│   ├── memory/
+│   │   ├── database.ts              # Фасад БД
+│   │   ├── schema.ts                # Схема БД и миграции
+│   │   ├── session-memory.ts        # Извлечение фактов
+│   │   ├── result-compressor.ts     # Сжатие результатов
+│   │   ├── consolidation.ts         # Auto-Consolidation
+│   │   ├── repositories/            # Репозитории для каждой таблицы
+│   │   │   ├── tool-outputs.repository.ts
+│   │   │   ├── subagent-results.repository.ts
+│   │   │   ├── session-facts.repository.ts
+│   │   │   ├── compaction.repository.ts
+│   │   │   ├── failures.repository.ts
+│   │   │   └── compressed-results.repository.ts
+│   │   └── utils/
+│   │       ├── hash.ts              # Вычисление SHA-256
+│   │       └── priority.ts          # Вычисление приоритета
+│   ├── context-tools/
+│   │   ├── ctx-bash.ts              # bash с сохранением
+│   │   ├── ctx-read.ts              # read с сохранением
+│   │   ├── ctx-search.ts            # ctx_search (FTS5)
+│   │   └── utils/
+│   │       ├── analyzers.ts         # Анализаторы вывода
+│   │       ├── summary.ts           # Генерация summary
+│   │       ├── compaction-summary.ts
+│   │       ├── failure-detector.ts  # Детектор неудач
+│   │       └── secret-scanner.ts    # Сканирование секретов
+│   ├── ui/
+│   │   └── agent-widget.ts          # Виджет статуса
+│   └── renderers/
+│       └── message-renderers.ts
+│
+├── loop-police/                     # Защита от зацикливания
+│   ├── index.ts                     # Точка входа
+│   ├── loop-detector.ts             # Детектор зацикливания
+│   ├── semantic-analyzer.ts         # Семантический анализ
+│   └── commands/
+│       └── loop-police-commands.ts  # /loop-police команда
+│
+├── pi-minimal-web/                  # Веб-инструменты
+│   ├── index.ts                     # Точка входа
+│   ├── exa.ts                       # Exa API клиент
+│   ├── extract.ts                   # Извлечение контента
+│   └── tools/
+│       ├── web-search.ts            # web_search инструмент
+│       └── fetch-content.ts         # fetch_content инструмент
+│
+└── extensions/                      # Дополнительные расширения
+    ├── add_context.ts               # /add_context команда
+    └── web-search-guidance.ts       # Автообучение модели
+```
 
 ---
 
@@ -82,19 +188,45 @@ ls({ path: ".", options: "-la" })
 
 - **Priority**: обычно 🟢 (низкий приоритет)
 
-#### `ctx_search` (новый инструмент)
+#### `ctx_search` (pi-sub)
 
 ```typescript
 ctx_search({ query: "registerCommand", limit: 10 })
-ctx_search({ query: "id:42" })  # полный вывод по ID
+ctx_search({ query: "id:42" })           // числовой ID
+ctx_search({ query: "id:28622e05-cd3b-492" })  // UUID субагента
 ```
 
 - Полнотекстовый поиск (FTS5) по всем сохранённым выводам
 - Поиск по tool_name, args, output, summary
 - Специальный запрос `id:<n>` для получения полного вывода
-- Группировка keywords по компакциям (одна компакция = одна строка)
+- **Поддержка UUID**: работает с укороченными UUID субагентов
+- Группировка keywords по компакциям
 - **Priority-based sorting**: результаты tool_outputs сортируются по приоритету
 - **Priority emoji**: 🔴 критический, 🟠 высокий, 🟡 средний, 🟢 низкий
+
+### Веб-инструменты (pi-minimal-web)
+
+#### `web_search`
+
+```typescript
+web_search({ query: "pi coding agent", numResults: 3 })
+```
+
+- Поиск в интернете через Exa API
+- `numResults`: количество результатов (по умолчанию 1, макс 5)
+- `offset`: смещение для пагинации
+- **Валидация**: web-search-guidance ограничивает numResults ≤ 2
+
+#### `fetch_content`
+
+```typescript
+fetch_content({ url: "https://example.com", maxLength: 2000 })
+```
+
+- Получение содержимого URL как markdown
+- `maxLength`: максимальная длина (по умолчанию 1000, макс 10000)
+- `offset`: смещение для пагинации
+- **Валидация**: web-search-guidance проверяет maxLength и offset
 
 ### Встроенные инструменты (pi-coding-agent)
 
@@ -111,20 +243,6 @@ edit({
   path: "file.ts", 
   edits: [{ oldText: "foo", newText: "bar" }] 
 })
-```
-
-### Инструменты из других расширений
-
-#### `web_search` (pi-minimal-web)
-
-```typescript
-web_search({ query: "pi coding agent", numResults: 3 })
-```
-
-#### `fetch_content` (pi-minimal-web)
-
-```typescript
-fetch_content({ url: "https://example.com", maxLength: 2000 })
 ```
 
 ---
@@ -163,6 +281,7 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | `/memory-summaries` | Показать summaries компакции | `[limit]` |
 | `/memory-keywords` | Показать ключевые слова компакций | `[query]` |
 | `/memory-failures` | Показать память о неудачах | `[query]` |
+| `/memory-subagents` | Показать все результаты субагентов | `[query]` или `[limit=N]` |
 | `/memory-consolidate` | Консолидация похожих записей | `[--dry-run] [threshold=0.7]` |
 
 **Типы фактов:**
@@ -182,8 +301,37 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 /memory-keywords WAL              # Поиск по ключевым словам
 /memory-keywords                  # Показать последние ключевые слова
 /memory-failures ENOENT           # Поиск по неудачам
+/memory-subagents                 # Показать все результаты субагентов
+/memory-subagents subagent        # Поиск по ключевому слову
+/memory-subagents limit=50        # Показать больше результатов
 /memory-consolidate --dry-run     # Тест консолидации
 /memory-consolidate threshold=0.8 # Консолидация с порогом 0.8
+```
+
+### Управление loop-police
+
+| Команда | Описание | Параметры |
+|---------|----------|-----------|
+| `/loop-police` | Показать статус детекции зацикливания | - |
+| `/loop-police reset` | Сбросить все состояния | `all` или `<sessionId>` |
+| `/loop-police set` | Установить параметры | `KEY=VAL [KEY=VAL ...]` |
+
+**Доступные параметры:**
+
+```bash
+/loop-police set REPEATED_TOOL_CALL_LIMIT=5
+/loop-police set SEMANTIC_LOOP_THRESHOLD=0.7
+/loop-police set STAGNATION_TURNS=5
+/loop-police set FILE_READ_LIMIT=5
+/loop-police set FILE_READ_WINDOW=600
+```
+
+**Примеры:**
+
+```bash
+/loop-police                    # Статус
+/loop-police reset all          # Сброс всех состояний
+/loop-police set REPEATED_TOOL_CALL_LIMIT=5
 ```
 
 ### Другие команды
@@ -191,16 +339,7 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | Команда | Источник | Описание |
 |---------|----------|----------|
 | `/agents` | pi-sub | Меню выбора типа агента |
-| `/loop-police` | loop-police | Управление loop-police |
 | `/add_context` | extensions | Отправить контекст модели |
-
-**Примеры loop-police:**
-
-```bash
-/loop-police                    # Статус
-/loop-police reset all          # Сброс всех состояний
-/loop-police set REPEATED_TOOL_CALL_LIMIT=5
-```
 
 ### Встроенные команды (pi-coding-agent)
 
@@ -247,7 +386,7 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 | `session_before_compact` | Извлечение фактов + неудач (только для main agent) |
 | `before_agent_start` | Кастомный system prompt с memory policy |
 
-**Примечание:** Генерация `detailed_summary` и `meta` происходит в `agent-runner.ts` при событии `compaction_end` для **всех агентов** (main + subagents). Это позволяет сохранять полную историю работы субагентов.
+**Примечание:** Генерация `detailed_summary` и `meta` происходит в `agent-runner.ts` при событии `compaction_end` для **всех агентов** (main + subagents).
 
 ### loop-police
 
@@ -261,11 +400,11 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 
 **Детекция зацикливания:**
 
-- Character-level loops (повторяющиеся символы, порог: 80 символов)
-- Semantic loops (повторяющиеся мысли, similarity > 0.7)
-- Tool loops (одинаковые вызовы инструментов подряд, порог: 3)
-- Stagnation (отсутствие прогресса за 5 ходов, similarity > 0.85)
-- File read limits (лимит 5 чтений файлов за 600 секунд)
+- **Character-level loops** — повторяющиеся символы в thinking (порог: 80 символов)
+- **Semantic loops** — повторяющиеся мысли (similarity > 0.7)
+- **Tool loops** — одинаковые вызовы инструментов подряд (порог: 3)
+- **Stagnation** — отсутствие прогресса за 5 ходов (similarity > 0.85)
+- **File read limits** — лимит 5 чтений файлов за 600 секунд
 
 ### web-search-guidance
 
@@ -282,17 +421,17 @@ fetch_content({ url: "https://example.com", maxLength: 2000 })
 
 ## ⏱️ Фоновые процессы
 
-| Процесс | Период | Действие |
-|---------|--------|----------|
-| AgentManager cleanup | 60 сек | Очистка завершённых агентов |
-| AgentWidget update | 80 мс | Обновление виджета статуса |
-| Agent status polling | 1 сек / 500 мс | Мониторинг вывода / статуса |
-| Web search retry | 1 сек | Exponential backoff при rate limiting |
-| Content fetch timeout | Настраиваемый | Отмена запроса через AbortController |
+| Процесс | Период | Расширение | Действие |
+|---------|--------|------------|----------|
+| AgentManager cleanup | 60 сек | pi-sub | Очистка завершённых агентов |
+| AgentWidget update | 80 мс | pi-sub | Обновление виджета статуса |
+| Agent status polling | 1 сек / 500 мс | pi-sub | Мониторинг вывода / статуса |
+| Web search retry | 1 сек | pi-minimal-web | Exponential backoff при rate limiting |
+| Content fetch timeout | Настраиваемый | pi-minimal-web | Отмена запроса через AbortController |
 
 ---
 
-## 🧠 Система памяти
+## 🧠 Система памяти (pi-sub)
 
 ### Архитектура БД
 
@@ -368,8 +507,11 @@ Memory contains: decisions, lessons, preferences, architecture notes, API detail
 // Поиск по ключевым словам
 ctx_search({ query: "PostgreSQL" })
 
-// Поиск по ID (полный вывод)
+// Поиск по числовому ID (полный вывод)
 ctx_search({ query: "id:42" })
+
+// Поиск по UUID субагента (полный результат)
+ctx_search({ query: "id:28622e05-cd3b-492" })
 
 // Поиск по ключевым словам компакций
 ctx_search({ query: "WAL mode" })
@@ -693,69 +835,318 @@ pi.on("session_shutdown", async () => {
 - Освобождает файловые дескрипторы
 - Гарантирует целостность данных
 
-### Инжекция в промпт
+---
 
-При запуске субагента:
+## 🚔 Loop-Police: Защита от зацикливания
+
+### Что детектируется
+
+#### 1. Character-level loops
+
+Повторяющиеся символы в thinking-блоке модели:
 
 ```typescript
-const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
-const memoryBlock = `# Session Memory\n${relevantFacts.join("\n")}`;
-// Инжектируется в system prompt субагента
+// Пример зацикливания:
+"........."  // 80+ символов → детектируется
+"aaaaaaaaa"  // 80+ символов → детектируется
+```
+
+**Порог:** 80 символов  
+**Действие:** Обрезка thinking-блока
+
+#### 2. Semantic loops
+
+Повторяющиеся мысли/параграфы:
+
+```typescript
+// Модель повторяет одну и ту же мысль:
+Turn 1: "Нужно проверить файл database.ts"
+Turn 2: "Нужно проверить файл database.ts"
+Turn 3: "Нужно проверить файл database.ts"
+// similarity > 0.7 → детектируется
+```
+
+**Порог:** similarity > 0.7, 3+ повторений  
+**Действие:** Блокировка повторяющихся tool calls
+
+#### 3. Tool loops
+
+Одинаковые вызовы инструментов подряд:
+
+```typescript
+// Модель вызывает один и тот же инструмент с теми же аргументами:
+bash("ls -la")
+bash("ls -la")
+bash("ls -la")
+// 3+ повторений → детектируется
+```
+
+**Порог:** 3 одинаковых вызова подряд  
+**Действие:** Блокировка повторяющихся tool calls
+
+#### 4. Stagnation
+
+Отсутствие прогресса за несколько ходов:
+
+```typescript
+// Модель не делает прогресса:
+Turn 1: read("file.ts") → similarity 0.9
+Turn 2: read("file.ts") → similarity 0.9
+Turn 3: read("file.ts") → similarity 0.9
+Turn 4: read("file.ts") → similarity 0.9
+Turn 5: read("file.ts") → similarity 0.9
+// 5 ходов без прогресса → детектируется
+```
+
+**Порог:** 5 ходов, similarity > 0.85  
+**Действие:** Recovery mode (3 хода с повышенными лимитами)
+
+#### 5. File read limits
+
+Слишком частое чтение файлов:
+
+```typescript
+// Модель читает файлы слишком часто:
+read("file1.ts")
+read("file2.ts")
+read("file3.ts")
+read("file4.ts")
+read("file5.ts")
+read("file6.ts")  // 6-е чтение за 600 секунд → детектируется
+```
+
+**Порог:** 5 чтений за 600 секунд  
+**Действие:** Блокировка дальнейших чтений
+
+### Настройка параметров
+
+```bash
+# Показать текущие параметры
+/loop-police
+
+# Сбросить все состояния
+/loop-police reset all
+
+# Сбросить состояние для конкретной сессии
+/loop-police reset session-1234567890-abc123
+
+# Установить параметры
+/loop-police set REPEATED_TOOL_CALL_LIMIT=5
+/loop-police set SEMANTIC_LOOP_THRESHOLD=0.7
+/loop-police set STAGNATION_TURNS=5
+/loop-police set FILE_READ_LIMIT=5
+/loop-police set FILE_READ_WINDOW=600
+```
+
+### Доступные параметры
+
+| Параметр | По умолчанию | Описание |
+|----------|--------------|----------|
+| `REPEATED_TOOL_CALL_LIMIT` | 3 | Порог для tool loops |
+| `SEMANTIC_LOOP_THRESHOLD` | 0.7 | Порог similarity для semantic loops |
+| `STAGNATION_TURNS` | 5 | Количество ходов для stagnation detection |
+| `STAGNATION_THRESHOLD` | 0.85 | Порог similarity для stagnation |
+| `FILE_READ_LIMIT` | 5 | Лимит чтений файлов |
+| `FILE_READ_WINDOW` | 600 | Окно времени для file read limits (сек) |
+| `CHAR_LOOP_THRESHOLD` | 80 | Порог для character-level loops |
+
+---
+
+## 🌐 Pi-Minimal-Web: Веб-инструменты
+
+### web_search
+
+Поиск в интернете через Exa API:
+
+```typescript
+web_search({ 
+  query: "pi coding agent", 
+  numResults: 3,
+  offset: 0 
+})
+```
+
+**Параметры:**
+- `query` (обязательно): поисковый запрос
+- `numResults` (опционально): количество результатов (по умолчанию 1, макс 5)
+- `offset` (опционально): смещение для пагинации
+
+**Особенности:**
+- Использует Exa API для поиска
+- Rate limiting с exponential backoff
+- Возвращает результаты в формате markdown
+
+**Валидация (web-search-guidance):**
+- `numResults` ограничивается ≤ 2 (по умолчанию)
+- После 3+ правильных вызовов проверки отключаются
+
+### fetch_content
+
+Получение содержимого URL как markdown:
+
+```typescript
+fetch_content({ 
+  url: "https://example.com", 
+  maxLength: 2000,
+  offset: 0 
+})
+```
+
+**Параметры:**
+- `url` (обязательно): URL для загрузки
+- `maxLength` (опционально): максимальная длина (по умолчанию 1000, макс 10000)
+- `offset` (опционально): смещение для пагинации
+
+**Особенности:**
+- Извлекает контент и конвертирует в markdown
+- Настраиваемый timeout через AbortController
+- Поддержка пагинации через offset
+
+**Валидация (web-search-guidance):**
+- `maxLength` ограничивается ≤ 1000 без offset
+- Блокировка при `offset > 0` если весь контент уже получен
+- Блокировка при увеличении `maxLength` без offset
+
+---
+
+## 🎓 Web-Search-Guidance: Автообучение модели
+
+### Принцип работы
+
+Расширение автоматически обучает модель правильному использованию веб-инструментов через валидацию и обратную связь.
+
+### Валидация web_search
+
+```typescript
+// ❌ Неправильно (numResults > 2)
+web_search({ query: "test", numResults: 5 })
+// → Блокировка + предупреждение
+
+// ✅ Правильно (numResults ≤ 2)
+web_search({ query: "test", numResults: 2 })
+// → Успешный вызов
+```
+
+### Валидация fetch_content
+
+```typescript
+// ❌ Неправильно (maxLength > 1000 без offset)
+fetch_content({ url: "https://example.com", maxLength: 5000 })
+// → Блокировка + предупреждение
+
+// ✅ Правильно (maxLength ≤ 1000)
+fetch_content({ url: "https://example.com", maxLength: 1000 })
+// → Успешный вызов
+
+// ❌ Неправильно (offset > 0, но весь контент уже получен)
+fetch_content({ url: "https://example.com", offset: 1000 })
+// → Блокировка + предупреждение
+
+// ✅ Правильно (offset используется корректно)
+fetch_content({ url: "https://example.com", offset: 1000, maxLength: 1000 })
+// → Успешный вызов
+```
+
+### Автообучение
+
+Если модель **3+ раза подряд** правильно использует инструмент — проверки автоматически отключаются. Это позволяет модели работать быстрее после обучения.
+
+```typescript
+// Счётчик правильных вызовов
+let correctCalls = 0;
+
+pi.on("tool_result", (event, ctx) => {
+  if (event.toolName === "web_search" && isValid(event.result)) {
+    correctCalls++;
+    if (correctCalls >= 3) {
+      // Отключаем проверки
+      disableValidation();
+    }
+  }
+});
+```
+
+---
+
+## 🤝 Как расширения работают вместе
+
+### Взаимодействие pi-sub и loop-police
+
+```
+/agent-bg найди все TODO в проекте
+    │
+    ▼
+pi-sub создаёт субагента
+    │
+    ▼
+Субагент начинает работу
+    │
+    ├── loop-police мониторит на зацикливание
+    │   ├── Если character loop → обрезка thinking
+    │   ├── Если tool loop → блокировка повторных вызовов
+    │   └── Если stagnation → recovery mode
+    │
+    ▼
+Субагент завершает работу
+    │
+    ▼
+pi-sub сохраняет результат в БД
+```
+
+### Взаимодействие pi-sub и pi-minimal-web
+
+```
+/agent-bg найди информацию о TypeScript в интернете
+    │
+    ▼
+pi-sub создаёт субагента
+    │
+    ▼
+Субагент вызывает web_search
+    │
+    ├── web-search-guidance валидирует параметры
+    │   ├── Если numResults > 2 → блокировка
+    │   └── Если правильно → успешный вызов
+    │
+    ▼
+pi-minimal-web возвращает результаты
+    │
+    ▼
+pi-sub сохраняет результат в БД
+```
+
+### Взаимодействие всех расширений
+
+```
+Пользователь: /agent-bg исследуй проект и найди информацию в интернете
+    │
+    ▼
+pi-sub создаёт субагента
+    │
+    ├── loop-police мониторит на зацикливание
+    ├── web-search-guidance обучает использованию web инструментов
+    └── pi-minimal-web предоставляет веб-инструменты
+    │
+    ▼
+Субагент работает:
+    ├── read("package.json") → pi-sub сохраняет в БД
+    ├── web_search("TypeScript") → web-search-guidance валидирует
+    ├── fetch_content(url) → pi-minimal-web получает контент
+    └── bash("npm test") → pi-sub сохраняет в БД
+    │
+    ▼
+Субагент завершает работу
+    │
+    ▼
+pi-sub сохраняет результат в БД
+    │
+    ▼
+Модель может найти результат через ctx_search
 ```
 
 ---
 
 ## 🏗 Архитектура
-
-### Структура файлов
-
-```
-pi-sub/
-├── index.ts                    # Точка входа, инициализация
-├── agent-manager.ts            # Управление жизненным циклом
-├── agent-runner.ts             # Ядро выполнения + генерация compaction summary
-├── agent-types.ts              # Реестр типов агентов
-├── custom-agents.ts            # Загрузка из .pi/agents/
-├── default-agents.ts           # Встроенные агенты
-├── prompts.ts                  # Сборка системных промптов
-├── commands/
-│   ├── agent-commands.ts       # /agent-* команды
-│   ├── memory-commands.ts      # /memory-* команды
-│   └── agents-menu.ts          # /agents
-├── tools/
-│   └── register-tools.ts       # Переопределение инструментов
-├── memory/
-│   ├── database.ts             # Фасад БД (~250 строк)
-│   ├── schema.ts               # Схема БД и миграции (~350 строк)
-│   ├── session-memory.ts       # Извлечение фактов
-│   ├── result-compressor.ts    # Сжатие результатов
-│   ├── consolidation.ts        # Auto-Consolidation
-│   ├── repositories/           # Репозитории для каждой таблицы
-│   │   ├── index.ts            # Экспорты репозиториев
-│   │   ├── tool-outputs.repository.ts      # tool_outputs
-│   │   ├── subagent-results.repository.ts  # subagent_results
-│   │   ├── session-facts.repository.ts     # session_facts
-│   │   ├── compaction.repository.ts        # compaction_summaries + keywords
-│   │   ├── failures.repository.ts          # failures
-│   │   └── compressed-results.repository.ts # compressed_results
-│   └── utils/                  # Утилиты для БД
-│       ├── hash.ts             # Вычисление SHA-256 хэша
-│       └── priority.ts         # Вычисление приоритета (1-10)
-├── context-tools/
-│   ├── ctx-bash.ts             # bash с сохранением + deduplication + priority
-│   ├── ctx-read.ts             # read с сохранением + deduplication + priority
-│   ├── ctx-search.ts           # ctx_search (FTS5) с priority-based sorting
-│   └── utils/
-│       ├── analyzers.ts        # Анализаторы вывода (git, npm, docker, build)
-│       ├── summary.ts          # Генерация summary
-│       ├── compaction-summary.ts # Генерация detailed_summary + meta
-│       ├── failure-detector.ts # Детектор неудач
-│       └── secret-scanner.ts   # Сканирование секретов
-├── ui/
-│   └── agent-widget.ts         # Виджет статуса (80ms)
-└── renderers/
-    └── message-renderers.ts    # Кастомный рендеринг
-```
 
 ### Жизненный цикл субагента
 
@@ -776,6 +1167,7 @@ AgentRunner.runAgent()
     │   └── Кастомный промпт с memory policy
     ├── Запускает agent loop
     │   ├── LLM вызывает инструменты
+    │   ├── loop-police мониторит на зацикливание
     │   ├── Инструменты сохраняют большие выводы в БД
     │   │   ├── Deduplication через content_hash
     │   │   ├── Priority System (1-10)
@@ -921,6 +1313,18 @@ sqlite3 .pi/memory/unified.db "SELECT name, (page_count * page_size) / 1024.0 / 
 [pi-sub] 🔇 Agent abc123: no-inject mode — showing result in UI only
 [pi-sub] ✂️ Truncated large tool output to prevent context overflow
 [pi-sub] 📦 Memory database closed
+[loop-police] ⚠️ Character loop detected in thinking (85 chars)
+[loop-police] ⚠️ Semantic loop detected (similarity: 0.82)
+[loop-police] ⚠️ Tool loop detected: bash called 3 times with same args
+[loop-police] ⚠️ Stagnation detected: no progress for 5 turns
+[loop-police] ⚠️ File read limit exceeded: 6 reads in 600 seconds
+[pi-minimal-web] 🔍 Searching: "pi coding agent"
+[pi-minimal-web] ✅ Found 3 results
+[pi-minimal-web] 🌐 Fetching: https://example.com
+[pi-minimal-web] ✅ Fetched 1500 chars
+[web-search-guidance] ⚠️ web_search blocked: numResults=5 > 2
+[web-search-guidance] ⚠️ fetch_content blocked: maxLength=5000 > 1000
+[web-search-guidance] ✅ Model learned: 3 correct calls in a row, disabling validation
 ```
 
 ### Тестирование инструментов
@@ -938,11 +1342,20 @@ ctx_search "seq"
 # Получить полный вывод
 ctx_search "id:1"
 
+# Поиск по UUID субагента
+ctx_search "id:28622e05-cd3b-492"
+
 # Поиск по ключевым словам
 /memory-keywords WAL
 
 # Поиск по неудачам
 /memory-failures ENOENT
+
+# Показать все результаты субагентов
+/memory-subagents
+
+# Поиск по результатам субагентов
+/memory-subagents subagent
 
 # Тест консолидации
 /memory-consolidate --dry-run
@@ -952,6 +1365,18 @@ ctx_search "id:1"
 
 # Тест всех операций
 /memory-test
+
+# Статус loop-police
+/loop-police
+
+# Сброс loop-police
+/loop-police reset all
+
+# Веб-поиск
+web_search "pi coding agent"
+
+# Получение контента
+fetch_content "https://example.com"
 ```
 
 ---
@@ -1044,13 +1469,14 @@ export class MyTableRepository {
 
 ## 📦 Зависимости
 
-| Пакет | Версия | Назначение |
-|-------|--------|-----------|
-| `better-sqlite3` | ^11.8.2 | SQLite база данных |
-| `@earendil-works/pi-coding-agent` | >=0.74.0 | API расширения (peer) |
-| `@earendil-works/pi-tui` | * | TUI компоненты (peer) |
-| `@sinclair/typebox` | ^0.34.33 | Схемы параметров |
-| `nanoid` | ^5.1.5 | Генерация ID |
+| Пакет | Версия | Назначение | Расширение |
+|-------|--------|------------|------------|
+| `better-sqlite3` | ^11.8.2 | SQLite база данных | pi-sub |
+| `@earendil-works/pi-coding-agent` | >=0.74.0 | API расширения (peer) | Все |
+| `@earendil-works/pi-tui` | * | TUI компоненты (peer) | pi-sub |
+| `@sinclair/typebox` | ^0.34.33 | Схемы параметров | pi-sub |
+| `nanoid` | ^5.1.5 | Генерация ID | pi-sub |
+| `exa-js` | ^1.0.0 | Exa API клиент | pi-minimal-web |
 
 ---
 
@@ -1058,11 +1484,15 @@ export class MyTableRepository {
 
 | Категория | Количество |
 |-----------|------------|
+| Расширения | 5 |
 | Переопределённые инструменты | 5 (bash, read, grep, find, ls) |
-| Новые инструменты | 1 (ctx_search) |
-| Команды pi-sub | 16 |
+| Новые инструменты | 3 (ctx_search, web_search, fetch_content) |
+| Команды pi-sub | 17 |
+| Команды loop-police | 1 |
+| Команды extensions | 1 |
 | События pi-sub | 9 |
 | События loop-police | 5 |
+| События web-search-guidance | 4 |
 | Фоновые процессы | 5 |
 | Таблицы БД | 7 |
 | FTS5 индексов | 7 |
@@ -1072,9 +1502,11 @@ export class MyTableRepository {
 
 ## 📖 Источники
 
-- **Исходный код**: `~/.pi/agent/npm/pi-sub/`
+- **Репозиторий**: https://github.com/igorpichnenko/my-monster-config
+- **Исходный код**: `~/.pi/agent/npm/my-monster-config/`
 - **Документация pi**: `~/.nvm/versions/node/v22.23.0/lib/node_modules/@earendil-works/pi-coding-agent/docs/`
 - **Примеры**: `~/.nvm/versions/node/v22.23.0/lib/node_modules/@earendil-works/pi-coding-agent/examples/`
+- **Exa API**: https://docs.exa.ai/
 
 ---
 
@@ -1102,3 +1534,8 @@ export class MyTableRepository {
 20. **Automatic Purge**: Контроль размера БД (раз в неделю, выборочная очистка)
 21. **Безопасное закрытие БД**: memoryDb.close() в session_shutdown
 22. **Модульная архитектура**: database.ts разделён на репозитории и утилиты
+23. **Поддержка UUID**: ctx_search работает с укороченными UUID субагентов
+24. **Веб-инструменты**: Интеграция с Exa API для поиска в интернете
+25. **Автообучение**: web-search-guidance обучает модель правильному использованию web инструментов
+26. **Rate limiting**: Exponential backoff при превышении лимитов API
+27. **Валидация параметров**: Автоматическая проверка параметров web инструментов

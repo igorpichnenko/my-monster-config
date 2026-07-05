@@ -6,6 +6,7 @@
  * Phase 9: Correction Detection (интегрирован в index.ts)
  * Phase 10: Auto-Consolidation (/memory-consolidate)
  * Phase 11: Failure Memory (/memory-failures)
+ * Phase 12: Subagent Results Viewer (/memory-subagents)
  */
 
 import type { PiSubContext } from "../types/pi-sub-context.js";
@@ -590,6 +591,91 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           if (f.context) lines.push(`Context: ${f.context}`);
           lines.push(``);
         }
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // /memory-subagents [limit] — Показать все результаты субагентов (Phase 12)
+  pi.registerCommand("memory-subagents", {
+    description: "Show all subagent results: /memory-subagents [limit]",
+    handler: async (argStr, cmdCtx) => {
+      if (!memoryDb) {
+        cmdCtx.ui.notify("❌ Memory database not initialized", "error");
+        return;
+      }
+
+      const args = argStr.trim();
+      let limit = 20;
+      let query = "";
+      
+      if (args) {
+        const limitMatch = args.match(/limit=(\d+)/);
+        if (limitMatch) {
+          limit = parseInt(limitMatch[1]);
+        } else {
+          query = args;
+        }
+      }
+
+      try {
+        const raw = memoryDb.getRaw();
+        
+        // Если есть запрос — используем FTS5 поиск
+        let results: any[];
+        if (query) {
+          results = raw.prepare(`
+            SELECT s.* FROM subagent_results s
+            JOIN subagent_results_fts f ON s.rowid = f.rowid
+            WHERE subagent_results_fts MATCH ?
+            ORDER BY s.timestamp DESC
+            LIMIT ?
+          `).all(`"${query}"`, limit);
+        } else {
+          results = raw.prepare(`
+            SELECT id, agent_type, description, status, tool_uses, 
+                   duration_ms, timestamp
+            FROM subagent_results
+            ORDER BY timestamp DESC
+            LIMIT ?
+          `).all(limit);
+        }
+        
+        if (results.length === 0) {
+          cmdCtx.ui.notify(
+            `🤖 No subagent results found${query ? ` for: "${query}"` : ''}.\n` +
+            `Subagent results are saved automatically when /agent-bg completes.`,
+            "info"
+          );
+          return;
+        }
+        
+        const lines = [
+          `🤖 Subagent Results (${results.length} shown${query ? ` for: "${query}"` : ''})`,
+          ``,
+        ];
+
+        for (const r of results) {
+          const date = new Date(r.timestamp).toLocaleString();
+          const statusEmoji = r.status === 'completed' ? '✅' : 
+                             r.status === 'error' ? '❌' : 
+                             r.status === 'aborted' ? '🛑' : '⏸️';
+          const duration = (r.duration_ms / 1000).toFixed(1);
+          
+          // Укорачиваем ID для отображения (берём первые 16 символов)
+          const shortId = r.id.slice(0, 16);
+          
+          lines.push(`${statusEmoji} [${r.agent_type}] ${r.description}`);
+          lines.push(`   ID: ${shortId} | ${date} | ${r.tool_uses} tools | ${duration}s | Status: ${r.status}`);
+          lines.push(`   💡 Use ctx_search "id:${shortId}" to see full result`);
+          lines.push(``);
+        }
+        
+        lines.push(`💡 Use /memory-subagents <query> to search by keyword`);
+        lines.push(`💡 Use /memory-subagents limit=50 to see more results`);
         
         cmdCtx.ui.notify(lines.join("\n"), "info");
       } catch (err) {

@@ -9,7 +9,7 @@
 import type Database from "better-sqlite3";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 /**
  * Инициализирует схему БД.
@@ -109,6 +109,24 @@ function createAllTables(db: Database.Database): void {
       content_rowid='rowid',
       tokenize='unicode61'
     );
+
+    -- v9: Триггеры для subagent_results (были пропущены в v8!)
+    CREATE TRIGGER IF NOT EXISTS subagent_results_ai AFTER INSERT ON subagent_results BEGIN
+      INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
+      VALUES (new.rowid, new.agent_type, new.description, new.result);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS subagent_results_ad AFTER DELETE ON subagent_results BEGIN
+      INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
+      VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS subagent_results_au AFTER UPDATE ON subagent_results BEGIN
+      INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
+      VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
+      INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
+      VALUES (new.rowid, new.agent_type, new.description, new.result);
+    END;
 
     -- Session Facts
     CREATE TABLE IF NOT EXISTS session_facts (
@@ -301,7 +319,7 @@ function createAllTables(db: Database.Database): void {
 }
 
 /**
- * Выполняет миграции от旧 версии до текущей.
+ * Выполняет миграции от старой версии до текущей.
  */
 function migrate(db: Database.Database, fromVersion: number): void {
   console.log(`[pi-sub] Migrating schema from v${fromVersion} to v${SCHEMA_VERSION}`);
@@ -495,6 +513,38 @@ function migrate(db: Database.Database, fromVersion: number): void {
         CREATE INDEX IF NOT EXISTS idx_tool_outputs_priority ON tool_outputs(priority DESC);
       `);
     }
+  }
+
+  // v9: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавляем триггеры для subagent_results
+  // В v8 они были пропущены, из-за чего FTS5 не индексировал новые записи
+  if (fromVersion < 9) {
+    console.log(`[pi-sub] Migrating to v9: Adding subagent_results triggers (CRITICAL FIX)`);
+    
+    db.exec(`
+      -- Создаём триггеры для subagent_results
+      CREATE TRIGGER IF NOT EXISTS subagent_results_ai AFTER INSERT ON subagent_results BEGIN
+        INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
+        VALUES (new.rowid, new.agent_type, new.description, new.result);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS subagent_results_ad AFTER DELETE ON subagent_results BEGIN
+        INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
+        VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
+      END;
+
+      CREATE TRIGGER IF NOT EXISTS subagent_results_au AFTER UPDATE ON subagent_results BEGIN
+        INSERT INTO subagent_results_fts(subagent_results_fts, rowid, agent_type, description, result)
+        VALUES ('delete', old.rowid, old.agent_type, old.description, old.result);
+        INSERT INTO subagent_results_fts(rowid, agent_type, description, result)
+        VALUES (new.rowid, new.agent_type, new.description, new.result);
+      END;
+
+      -- Перестраиваем FTS5 индекс для существующих записей
+      -- Это добавит в индекс все записи, которые были сохранены до добавления триггеров
+      INSERT INTO subagent_results_fts(subagent_results_fts) VALUES('rebuild');
+    `);
+    
+    console.log(`[pi-sub] ✅ subagent_results FTS5 index rebuilt`);
   }
 
   db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);

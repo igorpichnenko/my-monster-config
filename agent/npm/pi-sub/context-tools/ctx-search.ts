@@ -9,12 +9,13 @@
  * - compressed_results (сжатые результаты)
  * - compaction_keywords (нормализованные ключевые слова компакций)
  * 
- * Поддерживает специальный запрос "id:<number>" для получения полного вывода.
+ * Поддерживает специальные запросы:
+ * - "id:<number>" — получение полного вывода по числовому ID
+ * - "id:<uuid>" — получение результата субагента по UUID (полному или укороченному)
  * 
  * Phase 12: Priority-based sorting
- * - Результаты tool_outputs сортируются по priority DESC, timestamp DESC
- * - При поиске по ID показывается приоритет
- * - Эмодзи приоритета для визуального различения
+ * v9: Исправлена обработка строковых ID для subagent_results
+ * v9.1: Добавлена поддержка укороченных UUID
  */
 
 import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword } from "../memory/database.js";
@@ -35,6 +36,46 @@ interface SearchResult {
   priority?: Priority;
 }
 
+/**
+ * Проверяет, похожа ли строка на UUID (полный или укороченный).
+ * 
+ * Поддерживает форматы:
+ * - Полный UUID: 28622e05-cd3b-4923-8f1a-5b7c9d4e6f8a
+ * - Укороченный: 28622e05-cd3b-492 (то что показывает pi)
+ * - Короткий префикс: 28622e05
+ */
+function looksLikeSubagentId(str: string): boolean {
+  // Содержит hex + дефис → скорее всего UUID или его часть
+  if (/^[0-9a-f]+-[0-9a-f]+/i.test(str)) {
+    return true;
+  }
+  // Чистый hex от 6 символов (короткий префикс)
+  if (/^[0-9a-f]{6,}$/i.test(str) && !/^\d+$/.test(str)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Находит subagent_result по ID (полному, укороченному или префиксу).
+ */
+function findSubagentResultById(db: MemoryDatabase, idStr: string): SubagentResult | null {
+  // 1. Попытка точного совпадения (полный UUID)
+  const exact = db.getSubagentResult(idStr);
+  if (exact) return exact;
+  
+  // 2. Поиск по префиксу в БД напрямую
+  const raw = db.getRaw();
+  const rows = raw.prepare(`
+    SELECT * FROM subagent_results
+    WHERE id LIKE ?
+    ORDER BY timestamp DESC
+    LIMIT 1
+  `).all(`${idStr}%`) as SubagentResult[];
+  
+  return rows[0] || null;
+}
+
 export function executeCtxSearch(
   args: CtxSearchArgs,
   db: MemoryDatabase
@@ -43,9 +84,34 @@ export function executeCtxSearch(
   
   // Специальный запрос для получения полного вывода по ID
   if (query.startsWith("id:")) {
-    const id = parseInt(query.slice(3));
+    const idStr = query.slice(3).trim();
+    
+    if (!idStr) {
+      return `❌ Empty ID. Use: id:<number> or id:<uuid>`;
+    }
+    
+    // v9.1: Сначала проверяем, похож ли ID на subagent ID
+    if (looksLikeSubagentId(idStr)) {
+      const subagentResult = findSubagentResultById(db, idStr);
+      if (subagentResult) {
+        return `━━━ Full Subagent Result [ID: ${subagentResult.id}] ━━━\n` +
+               `Agent: ${subagentResult.agent_type}\n` +
+               `Description: ${subagentResult.description}\n` +
+               `Date: ${new Date(subagentResult.timestamp).toLocaleString()}\n` +
+               `Status: ${subagentResult.status}\n` +
+               `Tool uses: ${subagentResult.tool_uses}\n` +
+               `Duration: ${subagentResult.duration_ms}ms\n\n` +
+               subagentResult.result;
+      }
+      return `❌ No subagent result found with ID: ${idStr}\n` +
+       `💡 Tip: pi uses shortened UUIDs. Try the ID from ctx_search results ` +
+       `(e.g., "28622e05-cd3b-492") or just the first 8 characters.`;
+    }
+    
+    // Числовой ID — для остальных таблиц
+    const id = parseInt(idStr);
     if (isNaN(id)) {
-      return `❌ Invalid ID format. Use: id:<number>`;
+      return `❌ Invalid ID format. Use: id:<number> or id:<uuid>`;
     }
     
     // 1. Ищем в tool_outputs
@@ -60,18 +126,7 @@ export function executeCtxSearch(
              toolOutput.output;
     }
     
-    // 2. Ищем в subagent_results (id — строка)
-    const subagentResult = db.getSubagentResult(String(id));
-    if (subagentResult) {
-      return `━━━ Full Subagent Result [ID: ${subagentResult.id}] ━━━\n` +
-             `Agent: ${subagentResult.agent_type}\n` +
-             `Description: ${subagentResult.description}\n` +
-             `Date: ${new Date(subagentResult.timestamp).toLocaleString()}\n` +
-             `Status: ${subagentResult.status}\n\n` +
-             subagentResult.result;
-    }
-    
-    // 3. Ищем в session_facts
+    // 2. Ищем в session_facts
     const fact = db.getFactById(id);
     if (fact) {
       return `━━━ Full Session Fact [ID: ${fact.id}] ━━━\n` +
@@ -80,7 +135,7 @@ export function executeCtxSearch(
              fact.content;
     }
     
-    // 4. Ищем в compaction_summaries
+    // 3. Ищем в compaction_summaries
     const summary = db.getCompactionSummaryById(id);
     if (summary) {
       let result = `━━━ Full Compaction Summary [ID: ${summary.id}] ━━━\n` +
@@ -94,7 +149,7 @@ export function executeCtxSearch(
       return result;
     }
     
-    // 5. Ищем в compressed_results
+    // 4. Ищем в compressed_results
     const compressedResult = db.getCompressedResultById(id);
     if (compressedResult) {
       return `━━━ Full Compressed Result [ID: ${compressedResult.id}] ━━━\n` +
@@ -103,7 +158,7 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
-    // 6. Ищем в compaction_keywords
+    // 5. Ищем в compaction_keywords (по keyword ID)
     const keywords = db.getCompactionKeywords(id);
     if (keywords.length > 0) {
       const compactionId = keywords[0].compaction_id;
