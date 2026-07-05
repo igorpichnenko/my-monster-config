@@ -6,6 +6,8 @@
  * - result-compressor (кэш сжатых результатов)
  * - session-memory (долговременная память между сессиями)
  * - compaction-keywords (нормализованные ключевые слова компакций)
+ * - failures (память о неудачах)
+ * - secret-scanner (защита от утечек секретов)
  *
  * Архитектура:
  * - Singleton (один экземпляр на проект)
@@ -18,9 +20,10 @@
 import Database from "better-sqlite3";
 import { mkdirSync, existsSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
+import { scanForSecrets, redactSecret } from "../context-tools/utils/secret-scanner.js";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /** Путь к БД относительно корня проекта. */
 const DB_RELATIVE_PATH = ".pi/memory/unified.db";
@@ -76,6 +79,17 @@ export interface CompactionKeyword {
   compaction_id: number;
   keyword: string;
   category: "file" | "decision" | "lesson";
+  timestamp: number;
+}
+
+export interface FailureRecord {
+  id: number;
+  session_id: string;
+  approach: string;
+  error: string;
+  reason?: string;
+  solution?: string;
+  context?: string;
   timestamp: number;
 }
 
@@ -367,6 +381,48 @@ export class MemoryDatabase {
           VALUES (new.id, new.keyword);
         END;
 
+        -- ПАМЯТЬ О НЕУДАЧАХ (Failure Memory)
+        CREATE TABLE IF NOT EXISTS failures (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          approach TEXT NOT NULL,
+          error TEXT NOT NULL,
+          reason TEXT,
+          solution TEXT,
+          context TEXT,
+          timestamp INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_failures_timestamp 
+          ON failures(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_failures_session
+          ON failures(session_id);
+
+        -- FTS5 для поиска по failures
+        CREATE VIRTUAL TABLE IF NOT EXISTS failures_fts USING fts5(
+          approach, error, reason, solution, context,
+          content='failures',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS failures_ai AFTER INSERT ON failures BEGIN
+          INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
+          VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS failures_ad AFTER DELETE ON failures BEGIN
+          INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
+          VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS failures_au AFTER UPDATE ON failures BEGIN
+          INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
+          VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
+          INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
+          VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
+        END;
+
         INSERT INTO schema_version (version) VALUES (${SCHEMA_VERSION});
       `);
     } else if (currentVersion.version < SCHEMA_VERSION) {
@@ -551,6 +607,52 @@ export class MemoryDatabase {
       `);
     }
 
+    if (fromVersion < 7) {
+      console.log(`[pi-sub] Migrating to v7: Adding failures table`);
+      
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS failures (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          session_id TEXT NOT NULL,
+          approach TEXT NOT NULL,
+          error TEXT NOT NULL,
+          reason TEXT,
+          solution TEXT,
+          context TEXT,
+          timestamp INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_failures_timestamp 
+          ON failures(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_failures_session
+          ON failures(session_id);
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS failures_fts USING fts5(
+          approach, error, reason, solution, context,
+          content='failures',
+          content_rowid='id',
+          tokenize='unicode61'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS failures_ai AFTER INSERT ON failures BEGIN
+          INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
+          VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS failures_ad AFTER DELETE ON failures BEGIN
+          INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
+          VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS failures_au AFTER UPDATE ON failures BEGIN
+          INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
+          VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
+          INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
+          VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
+        END;
+      `);
+    }
+
     this.db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);
     console.log(`[pi-sub] Schema migrated to v${SCHEMA_VERSION}`);
   }
@@ -560,7 +662,7 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
-  // Tool Outputs
+  // Tool Outputs (с Secret Scanning)
   // =========================================================================
 
   saveToolOutput(data: {
@@ -569,6 +671,19 @@ export class MemoryDatabase {
     output: string;
     summary: string;
   }): number {
+    // Secret Scanning: проверяем output на секреты
+    const scanResult = scanForSecrets(data.output);
+    let outputToSave = data.output;
+    
+    if (scanResult.hasSecret) {
+      const secretTypes = scanResult.secrets.map(s => s.pattern).join(', ');
+      console.warn(
+        `[pi-sub] 🛡️ Secret detected in tool output (${data.toolName}): ${secretTypes}. ` +
+        `Saving redacted version.`
+      );
+      outputToSave = redactSecret(data.output);
+    }
+    
     const stmt = this.db.prepare(`
       INSERT INTO tool_outputs (tool_name, args, output, summary, timestamp, size)
       VALUES (?, ?, ?, ?, ?, ?)
@@ -577,10 +692,10 @@ export class MemoryDatabase {
     const result = stmt.run(
       data.toolName,
       data.args,
-      data.output,
+      outputToSave,
       data.summary,
       Date.now(),
-      data.output.length
+      outputToSave.length
     );
 
     return Number(result.lastInsertRowid);
@@ -619,7 +734,7 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
-  // Subagent Results
+  // Subagent Results (с Secret Scanning)
   // =========================================================================
 
   saveSubagentResult(data: {
@@ -631,6 +746,19 @@ export class MemoryDatabase {
     toolUses: number;
     durationMs: number;
   }): void {
+    // Secret Scanning: проверяем result на секреты
+    const scanResult = scanForSecrets(data.result);
+    let resultToSave = data.result;
+    
+    if (scanResult.hasSecret) {
+      const secretTypes = scanResult.secrets.map(s => s.pattern).join(', ');
+      console.warn(
+        `[pi-sub] 🛡️ Secret detected in subagent result (${data.id}): ${secretTypes}. ` +
+        `Saving redacted version.`
+      );
+      resultToSave = redactSecret(data.result);
+    }
+    
     this.db.prepare(`
       INSERT OR REPLACE INTO subagent_results 
       (id, agent_type, description, result, timestamp, status, tool_uses, duration_ms)
@@ -639,7 +767,7 @@ export class MemoryDatabase {
       data.id,
       data.agentType,
       data.description,
-      data.result,
+      resultToSave,
       Date.now(),
       data.status,
       data.toolUses,
@@ -728,8 +856,24 @@ export class MemoryDatabase {
     return result.changes;
   }
 
+  // Методы для Auto-Consolidation
+  updateFactContent(id: number, content: string): void {
+    this.db.prepare(`
+      UPDATE session_facts
+      SET content = ?
+      WHERE id = ?
+    `).run(content, id);
+  }
+
+  deleteFact(id: number): void {
+    this.db.prepare(`
+      DELETE FROM session_facts
+      WHERE id = ?
+    `).run(id);
+  }
+
   // =========================================================================
-  // Compressed Results Cache (теперь с FTS5!)
+  // Compressed Results Cache (с Secret Scanning)
   // =========================================================================
 
   getCompressedResult(originalHash: string): string | null {
@@ -740,6 +884,19 @@ export class MemoryDatabase {
   }
 
   saveCompressedResult(originalHash: string, compressed: string): number {
+    // Secret Scanning: проверяем compressed на секреты
+    const scanResult = scanForSecrets(compressed);
+    let compressedToSave = compressed;
+    
+    if (scanResult.hasSecret) {
+      const secretTypes = scanResult.secrets.map(s => s.pattern).join(', ');
+      console.warn(
+        `[pi-sub] 🛡️ Secret detected in compressed result: ${secretTypes}. ` +
+        `Saving redacted version.`
+      );
+      compressedToSave = redactSecret(compressed);
+    }
+    
     const existing = this.db.prepare(
       "SELECT id FROM compressed_results WHERE original_hash = ?"
     ).get(originalHash) as { id: number } | undefined;
@@ -749,7 +906,7 @@ export class MemoryDatabase {
         UPDATE compressed_results 
         SET compressed = ?, timestamp = ?
         WHERE original_hash = ?
-      `).run(compressed, Date.now(), originalHash);
+      `).run(compressedToSave, Date.now(), originalHash);
       return existing.id;
     }
     
@@ -758,7 +915,7 @@ export class MemoryDatabase {
       VALUES (?, ?, ?)
     `);
     
-    const result = stmt.run(originalHash, compressed, Date.now());
+    const result = stmt.run(originalHash, compressedToSave, Date.now());
     return Number(result.lastInsertRowid);
   }
 
@@ -787,7 +944,7 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
-  // Compaction Summaries
+  // Compaction Summaries (с Secret Scanning)
   // =========================================================================
 
   saveCompactionSummary(data: {
@@ -797,6 +954,21 @@ export class MemoryDatabase {
     summary: string;
     detailedSummary?: string;
   }): number {
+    // Secret Scanning: проверяем detailedSummary на секреты
+    let detailedToSave = data.detailedSummary || "";
+    
+    if (detailedToSave) {
+      const scanResult = scanForSecrets(detailedToSave);
+      if (scanResult.hasSecret) {
+        const secretTypes = scanResult.secrets.map(s => s.pattern).join(', ');
+        console.warn(
+          `[pi-sub] 🛡️ Secret detected in compaction summary: ${secretTypes}. ` +
+          `Saving redacted version.`
+        );
+        detailedToSave = redactSecret(detailedToSave);
+      }
+    }
+    
     const stmt = this.db.prepare(`
       INSERT INTO compaction_summaries 
       (session_id, reason, tokens_before, summary, detailed_summary, timestamp)
@@ -808,7 +980,7 @@ export class MemoryDatabase {
       data.reason,
       data.tokensBefore,
       data.summary,
-      data.detailedSummary || "",
+      detailedToSave,
       Date.now()
     );
 
@@ -860,10 +1032,6 @@ export class MemoryDatabase {
   // Compaction Keywords (нормализованные ключевые слова)
   // =========================================================================
 
-  /**
-   * Сохранить ключевое слово компакции.
-   * Возвращает ID сохранённой записи.
-   */
   saveCompactionKeyword(data: {
     compactionId: number;
     keyword: string;
@@ -884,10 +1052,6 @@ export class MemoryDatabase {
     return Number(result.lastInsertRowid);
   }
 
-  /**
-   * Сохранить несколько ключевых слов компакции за одну транзакцию.
-   * Это намного быстрее, чем сохранять по одному.
-   */
   saveCompactionKeywords(keywords: Array<{
     compactionId: number;
     keyword: string;
@@ -908,9 +1072,6 @@ export class MemoryDatabase {
     return insertMany(keywords);
   }
 
-  /**
-   * Получить все ключевые слова для конкретной компакции.
-   */
   getCompactionKeywords(compactionId: number): CompactionKeyword[] {
     return this.db.prepare(`
       SELECT * FROM compaction_keywords
@@ -919,10 +1080,6 @@ export class MemoryDatabase {
     `).all(compactionId) as CompactionKeyword[];
   }
 
-  /**
-   * Поиск по ключевым словам через FTS5.
-   * Возвращает ключевые слова с информацией о компакции.
-   */
   searchKeywords(query: string, limit: number = 10): Array<CompactionKeyword & {
     compaction_reason: string;
     compaction_tokens_before: number;
@@ -943,9 +1100,6 @@ export class MemoryDatabase {
     `).all(query, limit) as any[];
   }
 
-  /**
-   * Поиск по ключевым словам с фильтрацией по категории.
-   */
   searchKeywordsByCategory(
     query: string,
     category: "file" | "decision" | "lesson",
@@ -962,9 +1116,6 @@ export class MemoryDatabase {
     `).all(query, category, limit) as CompactionKeyword[];
   }
 
-  /**
-   * Получить последние N ключевых слов.
-   */
   getRecentKeywords(limit: number = 20): CompactionKeyword[] {
     return this.db.prepare(`
       SELECT * FROM compaction_keywords
@@ -973,9 +1124,6 @@ export class MemoryDatabase {
     `).all(limit) as CompactionKeyword[];
   }
 
-  /**
-   * Удалить старые ключевые слова (старше N дней).
-   */
   purgeOldKeywords(daysOld: number = 30): number {
     const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
     const result = this.db.prepare(
@@ -984,9 +1132,6 @@ export class MemoryDatabase {
     return result.changes;
   }
 
-  /**
-   * Получить статистику по ключевым словам.
-   */
   getKeywordsStats(): {
     total: number;
     byCategory: { file: number; decision: number; lesson: number };
@@ -1018,6 +1163,96 @@ export class MemoryDatabase {
   }
 
   // =========================================================================
+  // Failures (память о неудачах)
+  // =========================================================================
+
+  saveFailure(data: {
+    sessionId: string;
+    approach: string;
+    error: string;
+    reason?: string;
+    solution?: string;
+    context?: string;
+  }): number {
+    // Secret Scanning: проверяем все поля на секреты
+    const fieldsToCheck = [data.approach, data.error, data.reason || "", data.solution || "", data.context || ""];
+    let hasSecret = false;
+    
+    for (const field of fieldsToCheck) {
+      const scanResult = scanForSecrets(field);
+      if (scanResult.hasSecret) {
+        hasSecret = true;
+        break;
+      }
+    }
+    
+    let dataToSave = { ...data };
+    
+    if (hasSecret) {
+      console.warn(
+        `[pi-sub] 🛡️ Secret detected in failure record. Saving redacted version.`
+      );
+      dataToSave = {
+        ...data,
+        approach: redactSecret(data.approach),
+        error: redactSecret(data.error),
+        reason: data.reason ? redactSecret(data.reason) : undefined,
+        solution: data.solution ? redactSecret(data.solution) : undefined,
+        context: data.context ? redactSecret(data.context) : undefined,
+      };
+    }
+    
+    const stmt = this.db.prepare(`
+      INSERT INTO failures (session_id, approach, error, reason, solution, context, timestamp)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    const result = stmt.run(
+      dataToSave.sessionId,
+      dataToSave.approach,
+      dataToSave.error,
+      dataToSave.reason || null,
+      dataToSave.solution || null,
+      dataToSave.context || null,
+      Date.now()
+    );
+
+    return Number(result.lastInsertRowid);
+  }
+
+  getFailureById(id: number): FailureRecord | undefined {
+    return this.db.prepare(
+      "SELECT * FROM failures WHERE id = ?"
+    ).get(id) as FailureRecord | undefined;
+  }
+
+  searchFailures(query: string, limit: number = 10): FailureRecord[] {
+    return this.db.prepare(`
+      SELECT f.* FROM failures f
+      JOIN failures_fts ft ON f.id = ft.rowid
+      WHERE failures_fts MATCH ?
+      ORDER BY f.timestamp DESC
+      LIMIT ?
+    `).all(query, limit) as FailureRecord[];
+  }
+
+  getRecentFailures(limit: number = 20): FailureRecord[] {
+    return this.db.prepare(`
+      SELECT * FROM failures
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `).all(limit) as FailureRecord[];
+  }
+
+  purgeOldFailures(daysOld: number = 30): number {
+    const cutoff = Date.now() - daysOld * 24 * 60 * 60 * 1000;
+    const result = this.db.prepare(
+      "DELETE FROM failures WHERE timestamp < ?"
+    ).run(cutoff);
+    return result.changes;
+  }
+
+  // =========================================================================
   // Статистика
   // =========================================================================
 
@@ -1028,6 +1263,7 @@ export class MemoryDatabase {
     compressedResults: number;
     compactionSummaries: number;
     compactionKeywords: number;
+    failures: number;
     dbSizeMb: number;
   } {
     const toolOutputs = (this.db.prepare(
@@ -1054,6 +1290,10 @@ export class MemoryDatabase {
       "SELECT COUNT(*) as count FROM compaction_keywords"
     ).get() as { count: number }).count;
 
+    const failures = (this.db.prepare(
+      "SELECT COUNT(*) as count FROM failures"
+    ).get() as { count: number }).count;
+
     const pageInfo = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
     const pageSize = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
     const dbSizeMb = (pageInfo.page_count * pageSize.page_size) / (1024 * 1024);
@@ -1065,6 +1305,7 @@ export class MemoryDatabase {
       compressedResults,
       compactionSummaries,
       compactionKeywords,
+      failures,
       dbSizeMb 
     };
   }

@@ -8,6 +8,11 @@
  * Phase 4C: Custom system prompt with memory policy
  * Phase 5: Normalized compaction keywords for better search
  * Phase 6: Compaction data for all agents (main + subagents)
+ * Phase 7: Secret Scanning — защита от утечек секретов
+ * Phase 8: Background Learning — фоновое извлечение фактов
+ * Phase 9: Correction Detection — детекция исправлений пользователя
+ * Phase 10: Auto-Consolidation — автоматическая консолидация похожих записей
+ * Phase 11: Failure Memory — память о неудачах
  */
 
 import { dirname, join } from "node:path";
@@ -32,6 +37,8 @@ import { registerTools } from "./tools/register-tools.js";
 import { registerAgentCommands } from "./commands/agent-commands.js";
 import { registerMemoryCommands } from "./commands/memory-commands.js";
 import { registerAgentsMenu } from "./commands/agents-menu.js";
+import { extractFailuresFromMessages } from "./context-tools/utils/failure-detector.js";
+import { consolidateMemory } from "./memory/consolidation.js";
 
 // ============================================================================
 // Вспомогательные функции (вынесены наружу для чистоты)
@@ -113,6 +120,7 @@ export default function (pi: ExtensionAPI) {
         `Subagent results: ${stats.subagentResults}, ` +
         `Session facts: ${stats.sessionFacts}, ` +
         `Compaction keywords: ${stats.compactionKeywords}, ` +
+        `Failures: ${stats.failures}, ` +
         `Size: ${stats.dbSizeMb.toFixed(2)} MB`,
     );
   } catch (err) {
@@ -373,6 +381,12 @@ export default function (pi: ExtensionAPI) {
   registerAgentsMenu(piSubContext);
 
   // ==========================================================================
+  // ФАЗА 8: Background Learning — счётчик ходов
+  // ==========================================================================
+  let backgroundLearningTurnCount = 0;
+  const BACKGROUND_LEARNING_INTERVAL = 10; // каждые 10 ходов
+
+  // ==========================================================================
   // События сессии
   // ==========================================================================
   pi.on("session_start", async (event: any, ctx) => {
@@ -386,6 +400,19 @@ export default function (pi: ExtensionAPI) {
         `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       sessionMemory.setSessionId(newSessionId);
       console.log(`[pi-sub] 🧠 Session ID updated: ${newSessionId}`);
+    }
+
+    // ФАЗА 10: Auto-Consolidation при старте сессии
+    if (memoryDb) {
+      const stats = memoryDb.getStats();
+      if (stats.sessionFacts > 1000) {
+        console.log(`[pi-sub] 🔄 Auto-consolidation triggered (${stats.sessionFacts} facts)`);
+        try {
+          consolidateMemory(memoryDb, { threshold: 0.7 });
+        } catch (err) {
+          console.error(`[pi-sub] ❌ Auto-consolidation failed:`, err);
+        }
+      }
     }
   });
 
@@ -401,6 +428,92 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_execution_start", async (_event, ctx) => {
     widget.setUICtx(ctx.ui as UICtx);
     widget.onTurnStart();
+  });
+
+  // ==========================================================================
+  // ФАЗА 8: Background Learning — обработчик turn_end
+  // ==========================================================================
+  pi.on("turn_end", async (event: any, ctx) => {
+    if (!sessionMemory || !memoryDb) return;
+    
+    backgroundLearningTurnCount++;
+    
+    if (backgroundLearningTurnCount % BACKGROUND_LEARNING_INTERVAL === 0) {
+      console.log(`[pi-sub] 🎓 Background learning triggered (turn ${backgroundLearningTurnCount})`);
+      
+      try {
+        let messages: any[] = [];
+        
+        if (ctx?.sessionManager?.getBranch) {
+          messages = ctx.sessionManager.getBranch() || [];
+        } else if (event?.messages) {
+          messages = event.messages;
+        } else if (ctx?.messages) {
+          messages = ctx.messages;
+        }
+        
+        if (messages.length === 0) return;
+        
+        // Берём последние 20 сообщений для анализа
+        const recentMessages = messages.slice(-20);
+        
+        const count = sessionMemory.extractAndSaveFacts(recentMessages);
+        if (count > 0) {
+          console.log(`[pi-sub] 🎓 Background learning saved ${count} facts`);
+        }
+      } catch (err) {
+        console.error(`[pi-sub] ❌ Background learning failed:`, err);
+      }
+    }
+  });
+
+  // ==========================================================================
+  // ФАЗА 9: Correction Detection — обработчик message_update
+  // ==========================================================================
+  const CORRECTION_PATTERNS = [
+    /нет,?\s+(это|не так|неправильно|неверно)/i,
+    /no,?\s+(that's|it's|not|incorrect|wrong)/i,
+    /исправь/i,
+    /correct/i,
+    /wrong/i,
+    /неверно/i,
+    /ошибк/i,
+    /неправ/i,
+    /stop,?\s+(that|it)/i,
+    /don't\s+do\s+that/i,
+  ];
+
+  pi.on("message_update", async (event: any, ctx) => {
+    if (!sessionMemory || !memoryDb) return;
+    
+    // Проверяем только user messages
+    if (event?.message?.role !== "user") return;
+    
+    const text = event.message.content
+      ?.map((c: any) => c.text || "")
+      .join(" ") || "";
+    
+    if (!text) return;
+    
+    // Проверяем паттерны исправлений
+    const isCorrection = CORRECTION_PATTERNS.some(pattern => pattern.test(text));
+    
+    if (isCorrection) {
+      console.log(`[pi-sub] ⚠️ Correction detected: ${text.slice(0, 80)}`);
+      
+      try {
+        // Сохраняем как урок
+        memoryDb.saveFact({
+          sessionId: sessionMemory.getSessionId(),
+          factType: "lesson",
+          content: `User correction: ${text.slice(0, 200)}`,
+        });
+        
+        console.log(`[pi-sub] ⚠️ Saved correction as lesson`);
+      } catch (err) {
+        console.error(`[pi-sub] ❌ Failed to save correction:`, err);
+      }
+    }
   });
 
   // ==========================================================================
@@ -445,10 +558,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ==========================================================================
-  // ФАЗА 4A: Автоматическое извлечение фактов перед сжатием контекста
+  // ФАЗА 4A + 11: Автоматическое извлечение фактов и неудач перед сжатием контекста
   // ==========================================================================
   pi.on("session_before_compact", async (event: any, ctx) => {
-    if (!sessionMemory) return;
+    if (!sessionMemory || !memoryDb) return;
 
     try {
       let messages: any[] = [];
@@ -466,12 +579,32 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      // ФАЗА 4A: Извлечение фактов
       const count = sessionMemory.extractAndSaveFacts(messages);
       if (count > 0) {
         console.log(`[pi-sub] 🧠 Extracted ${count} facts before compaction`);
       }
+
+      // ФАЗА 11: Извлечение неудач
+      const failures = extractFailuresFromMessages(messages);
+      
+      if (failures.length > 0) {
+        console.log(`[pi-sub] ⚠️ Found ${failures.length} failures in session`);
+        
+        for (const failure of failures) {
+          memoryDb.saveFailure({
+            sessionId: sessionMemory.getSessionId(),
+            approach: failure.approach,
+            error: failure.error,
+            reason: failure.reason,
+            solution: failure.solution,
+          });
+        }
+        
+        console.log(`[pi-sub] ⚠️ Saved ${failures.length} failures to memory`);
+      }
     } catch (err) {
-      console.error(`[pi-sub] ❌ Failed to extract facts:`, err);
+      console.error(`[pi-sub] ❌ Failed to extract facts/failures:`, err);
     }
   });
 

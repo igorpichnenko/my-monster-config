@@ -1,8 +1,15 @@
 /**
  * memory-commands.ts — Команды для работы с памятью.
+ * 
+ * Phase 7: Secret Scanning (интегрирован в database.ts)
+ * Phase 8: Background Learning (интегрирован в index.ts)
+ * Phase 9: Correction Detection (интегрирован в index.ts)
+ * Phase 10: Auto-Consolidation (/memory-consolidate)
+ * Phase 11: Failure Memory (/memory-failures)
  */
 
 import type { PiSubContext } from "../types/pi-sub-context.js";
+import { consolidateMemory } from "../memory/consolidation.js";
 
 export function registerMemoryCommands(ctx: PiSubContext): void {
   const { pi, memoryDb, sessionMemory } = ctx;
@@ -30,6 +37,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Compressed results: ${stats.compressedResults}`,
           `Compaction summaries: ${stats.compactionSummaries}`,
           `Compaction keywords: ${stats.compactionKeywords}`,
+          `Failures: ${stats.failures}`,
           `Database size: ${stats.dbSizeMb.toFixed(2)} MB`,
         ];
         
@@ -147,8 +155,21 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         const keywordSearch = memoryDb.searchKeywords("test-decision", 5);
         results.push(`✅ Keyword search: ${keywordSearch.length} results`);
         
+        // Тест failures
+        const failureId = memoryDb.saveFailure({
+          sessionId: `session-${Date.now()}`,
+          approach: "Tried to use fs.readFileSync",
+          error: "ENOENT: no such file or directory",
+          reason: "File doesn't exist yet",
+          solution: "Use fs.existsSync check first",
+        });
+        results.push(`✅ Failure saved (ID: ${failureId})`);
+        
+        const failureSearch = memoryDb.searchFailures("ENOENT", 5);
+        results.push(`✅ Failure search: ${failureSearch.length} results`);
+        
         const stats = memoryDb.getStats();
-        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.dbSizeMb.toFixed(2)} MB`);
+        results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.failures} failures, ${stats.dbSizeMb.toFixed(2)} MB`);
         
         cmdCtx.ui.notify(`🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n💡 Use /memory-stats to see full statistics.`, "info");
       } catch (err) {
@@ -185,6 +206,7 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         const deletedSummaries = memoryDb.purgeOldCompactionSummaries(factsDays);
         const deletedCompressed = memoryDb.purgeOldCompressedResults(factsDays);
         const deletedKeywords = memoryDb.purgeOldKeywords(factsDays);
+        const deletedFailures = memoryDb.purgeOldFailures(factsDays);
         const statsAfter = memoryDb.getStats();
         
         const lines = [
@@ -195,9 +217,10 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           `Compaction summaries (> ${factsDays} days): deleted ${deletedSummaries}`,
           `Compressed results (> ${factsDays} days): deleted ${deletedCompressed}`,
           `Compaction keywords (> ${factsDays} days): deleted ${deletedKeywords}`,
+          `Failures (> ${factsDays} days): deleted ${deletedFailures}`,
           ``,
-          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.compactionKeywords} keywords, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
-          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.compactionKeywords} keywords, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
+          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.compactionKeywords} keywords, ${statsBefore.failures} failures, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
+          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.compactionKeywords} keywords, ${statsAfter.failures} failures, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
         ];
         
         cmdCtx.ui.notify(lines.join("\n"), "info");
@@ -280,7 +303,6 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           lines.push(``);
         }
 
-        // НОВОЕ: поиск по compaction_keywords
         const keywordResults = memoryDb.searchKeywords(query, 5);
         if (keywordResults.length > 0) {
           lines.push(`🔑 Compaction keywords (${keywordResults.length}):`);
@@ -295,6 +317,18 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
             lines.push(`  ${icon} [${k.category}] ${k.keyword}`);
             lines.push(`    Compaction ID: ${k.compaction_id} (${k.compaction_reason}, ${k.compaction_tokens_before} tokens)`);
             lines.push(`    Date: ${date}`);
+          }
+          lines.push(``);
+        }
+
+        // НОВОЕ: поиск по failures
+        const failureResults = memoryDb.searchFailures(query, 5);
+        if (failureResults.length > 0) {
+          lines.push(`⚠️ Failures (${failureResults.length}):`);
+          for (const f of failureResults) {
+            const date = new Date(f.timestamp).toLocaleString();
+            lines.push(`  [ID:${f.id}] ${f.approach.slice(0, 50)} (${date})`);
+            lines.push(`    Error: ${f.error.slice(0, 80)}`);
           }
           lines.push(``);
         }
@@ -453,7 +487,6 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
         ];
 
         if (query) {
-          // Поиск по запросу
           const results = memoryDb.searchKeywords(query, 20);
           
           if (results.length === 0) {
@@ -479,7 +512,6 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
             }
           }
         } else {
-          // Показать последние ключевые слова
           const recent = memoryDb.getRecentKeywords(20);
           
           lines.push(`📋 Recent keywords (last 20):`);
@@ -503,6 +535,104 @@ export function registerMemoryCommands(ctx: PiSubContext): void {
           lines.push(`💡 Use ctx_search "id:<compaction_id>" to see full summary`);
         }
 
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // /memory-failures [query] — Показать память о неудачах
+  pi.registerCommand("memory-failures", {
+    description: "Show failure records: /memory-failures [query]",
+    handler: async (argStr, cmdCtx) => {
+      if (!memoryDb) {
+        cmdCtx.ui.notify("❌ Memory database not initialized", "error");
+        return;
+      }
+
+      const args = argStr.trim();
+      let limit = 10;
+      let query = "";
+      
+      if (args) {
+        const limitMatch = args.match(/limit=(\d+)/);
+        if (limitMatch) {
+          limit = parseInt(limitMatch[1]);
+        } else {
+          query = args;
+        }
+      }
+
+      try {
+        const failures = query 
+          ? memoryDb.searchFailures(query, limit)
+          : memoryDb.getRecentFailures(limit);
+        
+        if (failures.length === 0) {
+          cmdCtx.ui.notify("No failure records found", "info");
+          return;
+        }
+        
+        const lines = [
+          `⚠️ Failure Records (${failures.length} found)`,
+          ``,
+        ];
+        
+        for (const f of failures) {
+          const date = new Date(f.timestamp).toLocaleString();
+          lines.push(`━━━ Failure #${f.id} ━━━`);
+          lines.push(`Date: ${date}`);
+          lines.push(`Approach: ${f.approach}`);
+          lines.push(`Error: ${f.error}`);
+          if (f.reason) lines.push(`Reason: ${f.reason}`);
+          if (f.solution) lines.push(`Solution: ${f.solution}`);
+          if (f.context) lines.push(`Context: ${f.context}`);
+          lines.push(``);
+        }
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // /memory-consolidate — Автоматическая консолидация похожих записей
+  pi.registerCommand("memory-consolidate", {
+    description: "Consolidate similar memory entries: /memory-consolidate [--dry-run] [threshold=0.7]",
+    handler: async (argStr, cmdCtx) => {
+      if (!memoryDb) {
+        cmdCtx.ui.notify("❌ Memory database not initialized", "error");
+        return;
+      }
+
+      const args = argStr.trim();
+      let threshold = 0.7;
+      let dryRun = false;
+      
+      if (args.includes("--dry-run")) {
+        dryRun = true;
+      }
+      
+      const thresholdMatch = args.match(/threshold=(\d+\.?\d*)/);
+      if (thresholdMatch) {
+        threshold = parseFloat(thresholdMatch[1]);
+      }
+
+      try {
+        const result = consolidateMemory(memoryDb, { threshold, dryRun });
+        
+        const lines = [
+          `🔄 Memory Consolidation ${dryRun ? '(DRY RUN)' : ''}`,
+          ``,
+          `Groups found: ${result.groupsFound}`,
+          `Records merged: ${result.recordsMerged}`,
+          `Records deleted: ${result.recordsDeleted}`,
+          ``,
+          dryRun ? 'Run without --dry-run to apply changes' : 'Consolidation applied',
+        ];
+        
         cmdCtx.ui.notify(lines.join("\n"), "info");
       } catch (err) {
         cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
