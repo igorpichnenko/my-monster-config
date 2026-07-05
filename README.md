@@ -37,6 +37,7 @@
 | **Игнорирование исправлений** | Correction Detection (pi-sub) | ✅ Модель запоминает правки |
 | **Рост БД** | Automatic Purge раз в неделю (pi-sub) | ✅ Контроль размера БД |
 | **Повреждение WAL** | memoryDb.close() в session_shutdown (pi-sub) | ✅ Безопасное закрытие БД |
+| **Смешение фактов между проектами** | Project Isolation через project_path (pi-sub) | ✅ Факты изолированы по проектам |
 | **Нет доступа к интернету** | web_search через Exa API (pi-minimal-web) | ✅ Модель ищет в интернете |
 | **Неправильное использование web** | Автообучение модели (web-search-guidance) | ✅ Меньше ошибок |
 
@@ -376,9 +377,9 @@ edit({
 
 | Событие | Действие |
 |---------|----------|
-| `session_start` | Инициализация UI, set session ID, auto-consolidation если > 1000 записей, **automatic purge** если > 50 MB |
+| `session_start` | Инициализация UI, set session ID, **set project path**, auto-consolidation если > 1000 записей, **automatic purge** если > 50 MB |
 | `session_before_switch` | Очистка завершённых агентов |
-| `session_shutdown` | Abort всех, dispose, **закрытие БД** (memoryDb.close()) |
+| `session_shutdown` | Abort всех, dispose, **закрытие БД** (memoryDb.close()), **сброс singleton** (MemoryDatabase.resetInstance(), resetSessionMemory()) |
 | `tool_execution_start` | Обновление UI виджета |
 | `tool_result` | Обрезка вывода до 5KB |
 | `turn_end` | **Background Learning**: каждые 10 ходов извлекает факты |
@@ -450,6 +451,7 @@ edit({
 │
 ├── session_facts
 │   ├── id, session_id, fact_type, content, timestamp
+│   ├── project_path (v11: путь к проекту для изоляции)
 │   └── FTS5 index (session_facts_fts)
 │
 ├── compaction_summaries
@@ -486,7 +488,7 @@ Relevant context from previous sessions:
 - ⭐ [preference] Предпочитаю функциональный стиль
 ```
 
-**Ограничение:** Только `session_facts`, максимум 5 фактов.
+**Ограничение:** Только `session_facts`, максимум 5 фактов. **v11:** Факты фильтруются по `project_path` текущего проекта.
 
 #### 2. Memory Policy в system prompt (подсказка)
 
@@ -523,7 +525,7 @@ ctx_search({ query: "ENOENT" })
 **Что ищет:** По **ВСЕМ** таблицам с FTS5:
 - `tool_outputs` — прошлые выводы bash/read/grep/find/ls (с приоритетом)
 - `subagent_results` — результаты прошлых субагентов
-- `session_facts` — извлечённые факты
+- `session_facts` — извлечённые факты (с фильтром по проекту)
 - `compaction_summaries` — summaries компакций (main + subagents)
 - `compressed_results` — сжатые результаты
 - `compaction_keywords` — нормализованные ключевые слова (main + subagents)
@@ -562,7 +564,7 @@ api: "endpoint", "route", "auth", "API"
 2. Применяются regex-паттерны
 3. Фильтрация по длине (20-500 символов)
 4. Проверка дубликатов (hash)
-5. Сохранение в `session_facts`
+5. Сохранение в `session_facts` с `project_path`
 
 ### Компакции для всех агентов (Phase 6)
 
@@ -722,6 +724,7 @@ pi.on("message_update", async (event, ctx) => {
         sessionId: sessionMemory.getSessionId(),
         factType: "lesson",
         content: `User correction: ${text.slice(0, 200)}`,
+        projectPath: sessionMemory.getProjectPath(),
       });
     }
   }
@@ -780,6 +783,81 @@ if (scanResult.hasSecret) {
 /memory-consolidate               # Запуск консолидации
 ```
 
+### Project Isolation (v11)
+
+**Принцип:** Факты из `session_facts` изолированы между проектами через колонку `project_path`. При работе с разными проектами (React, Unreal Engine, Python) факты из одного проекта не видны в другом.
+
+**Как работает:**
+
+1. При `session_start` определяется `projectRoot` через `findProjectRoot(process.cwd())`
+2. `projectRoot` сохраняется в `sessionMemory.currentProjectPath`
+3. При сохранении факта передаётся `projectPath`:
+   ```typescript
+   memoryDb.saveFact({
+     sessionId: sessionMemory.getSessionId(),
+     factType: "decision",
+     content: "Используем PostgreSQL",
+     projectPath: sessionMemory.getProjectPath(),  // ← v11
+   });
+   ```
+4. При поиске фактов фильтруется по `project_path`:
+   ```sql
+   WHERE session_facts_fts MATCH ?
+     AND (project_path = ? OR project_path IS NULL)
+   ```
+
+**Пример:**
+
+```
+# Проект A: React (path: /home/user/react-app)
+/memory-add decision Используем PostgreSQL
+
+# Проект B: Unreal Engine (path: /home/user/ue-project)
+ctx_search "PostgreSQL"
+# ❌ Не найдено — факт из проекта A не виден в проекте B
+
+# Проект A: React
+ctx_search "PostgreSQL"
+# ✅ Найдено — факт виден в своём проекте
+```
+
+**Обратная совместимость:**
+
+Факты без `project_path` (NULL) видны во всех проектах. Это обеспечивает совместимость со старыми фактами, сохранёнными до v11.
+
+**Auto-Consolidation с изоляцией:**
+
+Консолидация работает только в рамках одного проекта:
+```typescript
+consolidateMemory(memoryDb, { 
+  threshold: 0.7, 
+  projectPath: sessionMemory.getProjectPath()  // ← v11
+});
+```
+
+**Singleton MemoryDatabase:**
+
+При смене проекта singleton автоматически пересоздаётся:
+```typescript
+static getInstance(projectDir: string = process.cwd()): MemoryDatabase {
+  const projectRoot = findProjectRoot(projectDir);
+  
+  if (MemoryDatabase.instance) {
+    // Если проект изменился — пересоздаём
+    if (MemoryDatabase.currentProjectRoot !== projectRoot) {
+      console.log(`[pi-sub] 🔄 Project changed: ${MemoryDatabase.currentProjectRoot} → ${projectRoot}`);
+      MemoryDatabase.resetInstance();
+    }
+  }
+  // ...
+}
+```
+
+**Зачем:**
+- Факты из React проекта не смешиваются с фактами из Unreal Engine
+- Модель получает только релевантные факты для текущего проекта
+- Auto-consolidation не объединяет факты из разных проектов
+
 ### Automatic Purge (Phase 13)
 
 **Принцип:** Автоматическая очистка старых данных из БД раз в неделю для контроля размера.
@@ -824,9 +902,19 @@ pi.on("session_shutdown", async () => {
   manager.dispose();
   
   if (memoryDb) {
-    memoryDb.close();
-    console.log(`[pi-sub] 📦 Memory database closed`);
+    try {
+      memoryDb.close();
+      console.log(`[pi-sub] 📦 Memory database closed`);
+    } catch (err) {
+      console.error(`[pi-sub] ❌ Failed to close memory database:`, err);
+    } finally {
+      // КРИТИЧНО: Сбрасываем singleton, чтобы getInstance() создал новый экземпляр
+      MemoryDatabase.resetInstance();
+    }
   }
+  
+  // v11: Сбрасываем SessionMemory singleton
+  resetSessionMemory();
 });
 ```
 
@@ -834,6 +922,7 @@ pi.on("session_shutdown", async () => {
 - Предотвращает повреждение WAL-файла при аварийном завершении
 - Освобождает файловые дескрипторы
 - Гарантирует целостность данных
+- **v11:** Сбрасывает singleton, чтобы при следующем запуске создался новый экземпляр с актуальным project root
 
 ---
 
@@ -1192,8 +1281,8 @@ onCompact callback
 ```
 session_start
     │
-    ├── Инициализация Session Memory
-    ├── Auto-Consolidation (если session_facts > 1000)
+    ├── Инициализация Session Memory (с project_path)
+    ├── Auto-Consolidation (если session_facts > 1000, в рамках проекта)
     └── Automatic Purge (если > 50 MB ИЛИ > 5000 tools, раз в неделю)
     │
     ▼
@@ -1209,7 +1298,7 @@ message_update (user messages)
     ▼
 session_before_compact
     │
-    ├── Извлечение фактов (только main agent)
+    ├── Извлечение фактов (только main agent, с project_path)
     └── Извлечение неудач (Failure Memory)
     │
     ▼
@@ -1222,7 +1311,9 @@ compaction_end (все агенты)
     ▼
 session_shutdown
     │
-    └── Закрытие БД (memoryDb.close())
+    ├── Закрытие БД (memoryDb.close())
+    ├── Сброс MemoryDatabase singleton (resetInstance())
+    └── Сброс SessionMemory singleton (resetSessionMemory())
 ```
 
 ### Типы агентов
@@ -1284,6 +1375,9 @@ sqlite3 .pi/memory/unified.db "SELECT id, approach, error FROM failures ORDER BY
 # Дубликаты (по хэшу)
 sqlite3 .pi/memory/unified.db "SELECT content_hash, COUNT(*) as count FROM tool_outputs WHERE content_hash IS NOT NULL GROUP BY content_hash HAVING count > 1;"
 
+# v11: Факты по проектам
+sqlite3 .pi/memory/unified.db "SELECT project_path, COUNT(*) FROM session_facts GROUP BY project_path;"
+
 # Размер по таблицам
 sqlite3 .pi/memory/unified.db "SELECT name, (page_count * page_size) / 1024.0 / 1024.0 as size_mb FROM pragma_page_count(), pragma_page_size();"
 ```
@@ -1291,8 +1385,11 @@ sqlite3 .pi/memory/unified.db "SELECT name, (page_count * page_size) / 1024.0 / 
 ### Логи
 
 ```
+[pi-sub] 📦 Memory database initialized at /home/user/project/.pi/memory/unified.db
+[pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123, Project: /home/user/project)
 [pi-sub] 📦 Memory database initialized. Tool outputs: 42, Subagent results: 5, Session facts: 12, Compaction keywords: 156, Failures: 3, Size: 12.5 MB
-[pi-sub] 🧠 Session memory initialized (ID: session-1234567890-abc123)
+[pi-sub] 🔄 Project changed: /home/user/project-a → /home/user/project-b
+[pi-sub] 🔄 Memory database was closed, reinitializing...
 [pi-sub] 🧹 DB size OK (30.5 MB, 2000 tools), skipping purge
 [pi-sub] 🧹 Running automatic purge (DB: 60.5 MB, 6000 tool outputs)...
 [pi-sub] 🧹 Purged: 5000 tools, 150 summaries, 300 keywords, 50 compressed. DB size: 60.5 MB → 25.3 MB
@@ -1377,6 +1474,13 @@ web_search "pi coding agent"
 
 # Получение контента
 fetch_content "https://example.com"
+
+# v11: Тест Project Isolation
+# 1. Запустить pi в проекте A
+# 2. /memory-add decision Используем PostgreSQL
+# 3. Выйти, запустить pi в проекте B
+# 4. ctx_search "PostgreSQL" — должно быть пусто
+# 5. Вернуться в проект A, ctx_search "PostgreSQL" — должно найти
 ```
 
 ---
@@ -1497,6 +1601,7 @@ export class MyTableRepository {
 | Таблицы БД | 7 |
 | FTS5 индексов | 7 |
 | Репозиториев | 6 |
+| Версия схемы БД | 11 |
 
 ---
 
@@ -1539,3 +1644,6 @@ export class MyTableRepository {
 25. **Автообучение**: web-search-guidance обучает модель правильному использованию web инструментов
 26. **Rate limiting**: Exponential backoff при превышении лимитов API
 27. **Валидация параметров**: Автоматическая проверка параметров web инструментов
+28. **Project Isolation (v11)**: Факты изолированы между проектами через `project_path`
+29. **Singleton Reinitialization**: MemoryDatabase автоматически пересоздаётся при смене проекта
+30. **Safe Shutdown**: Сброс singleton при session_shutdown предотвращает утечки памяти
