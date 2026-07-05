@@ -3,6 +3,8 @@
  * 
  * Фаза 4A: Извлекает факты (решения, уроки, предпочтения) из сообщений
  * сессии и сохраняет их в БД для использования в будущих сессиях.
+ * 
+ * v11: Добавлена поддержка project_path для изоляции между проектами
  */
 
 import { MemoryDatabase } from "./database.js";
@@ -49,6 +51,9 @@ export class SessionMemory {
   /** ID текущей сессии */
   private currentSessionId: string | null = null;
   
+  /** v11: Путь к текущему проекту */
+  private currentProjectPath: string | null = null;
+  
   constructor(private db: MemoryDatabase) {}
   
   /** Установить ID текущей сессии */
@@ -58,6 +63,19 @@ export class SessionMemory {
       this.currentSessionId = sessionId;
       logger.info(`Session memory: new session ${sessionId}`);
     }
+  }
+  
+  /** v11: Установить путь к текущему проекту */
+  setProjectPath(projectPath: string): void {
+    if (this.currentProjectPath !== projectPath) {
+      this.currentProjectPath = projectPath;
+      logger.info(`Session memory: project path ${projectPath}`);
+    }
+  }
+  
+  /** v11: Получить путь к текущему проекту */
+  getProjectPath(): string | null {
+    return this.currentProjectPath;
   }
   
   /** Получить ID текущей сессии */
@@ -104,6 +122,7 @@ export class SessionMemory {
           sessionId: this.currentSessionId!,
           factType: fact.type as any,
           content: fact.content,
+          projectPath: this.currentProjectPath || undefined,
         });
         this.savedFactHashes.add(this.hashFact(fact));
         count++;
@@ -210,17 +229,22 @@ export class SessionMemory {
       sessionId: this.currentSessionId!,
       factType: factType as any,
       content,
+      projectPath: this.currentProjectPath || undefined,
     });
   }
   
   /** 
    * Получить релевантные факты для промпта.
    * Улучшенная версия: ищет по отдельным словам и агрегирует результаты.
+   * 
+   * v11: Фильтрует по projectPath для изоляции между проектами
    */
   getRelevantFacts(query: string, limit: number = 5): any[] {
     try {
+      const projectPath = this.currentProjectPath || undefined;
+      
       // 1. Пробуем поиск по всему запросу
-      const fullResults = this.db.searchFacts(query, limit);
+      const fullResults = this.db.searchFacts(query, limit, projectPath);
       if (fullResults.length >= limit) {
         return fullResults;
       }
@@ -242,7 +266,7 @@ export class SessionMemory {
         
         try {
           // FTS5 поиск
-          const keywordResults = this.db.searchFacts(keyword, limit);
+          const keywordResults = this.db.searchFacts(keyword, limit, projectPath);
           for (const fact of keywordResults) {
             if (allResults.size >= limit) break;
             allResults.set(fact.id, fact);
@@ -250,7 +274,7 @@ export class SessionMemory {
         } catch (err) {
           // Если FTS5 не работает с этим словом — пробуем LIKE
           try {
-            const likeResults = this.db.searchFactsLike(`%${keyword}%`, limit);
+            const likeResults = this.db.searchFactsLike(`%${keyword}%`, limit, projectPath);
             for (const fact of likeResults) {
               if (allResults.size >= limit) break;
               allResults.set(fact.id, fact);
@@ -263,7 +287,7 @@ export class SessionMemory {
       
       // 4. Если всё ещё мало — возвращаем последние факты
       if (allResults.size < limit) {
-        const recentFacts = this.db.getRecentFacts(limit - allResults.size);
+        const recentFacts = this.db.getRecentFacts(limit - allResults.size, projectPath);
         for (const fact of recentFacts) {
           if (allResults.size >= limit) break;
           allResults.set(fact.id, fact);

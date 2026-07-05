@@ -3,6 +3,8 @@
  * 
  * Делегирует операции репозиториям, сохраняя старый API
  * для обратной совместимости.
+ * 
+ * v11: Singleton адаптируется к смене проекта, автоматически пересоздаётся
  */
 
 import Database from "better-sqlite3";
@@ -42,6 +44,7 @@ function findProjectRoot(startDir: string): string {
 export class MemoryDatabase {
   private db: Database.Database;
   private static instance: MemoryDatabase | null = null;
+  private static currentProjectRoot: string | null = null;
 
   // Репозитории
   public readonly toolOutputs: ToolOutputsRepository;
@@ -74,11 +77,39 @@ export class MemoryDatabase {
     this.compressedResults = new CompressedResultsRepository(this.db);
   }
 
+  /**
+   * Получить singleton экземпляр MemoryDatabase.
+   * 
+   * v11: Адаптируется к смене проекта — если projectRoot изменился,
+   *      пересоздаёт singleton с новой БД.
+   *      Также пересоздаёт если БД была закрыта.
+   */
   static getInstance(projectDir: string = process.cwd()): MemoryDatabase {
+    const projectRoot = findProjectRoot(projectDir);
+    
+    if (MemoryDatabase.instance) {
+      // Если проект изменился — пересоздаём
+      if (MemoryDatabase.currentProjectRoot !== projectRoot) {
+        console.log(
+          `[pi-sub] 🔄 Project changed: ${MemoryDatabase.currentProjectRoot} → ${projectRoot}`
+        );
+        MemoryDatabase.resetInstance();
+      } else {
+        // Проверяем что БД открыта
+        try {
+          MemoryDatabase.instance.db.prepare("SELECT 1").get();
+        } catch {
+          console.log(`[pi-sub] 🔄 Memory database was closed, reinitializing...`);
+          MemoryDatabase.resetInstance();
+        }
+      }
+    }
+    
     if (!MemoryDatabase.instance) {
-      const projectRoot = findProjectRoot(projectDir);
       const dbPath = join(projectRoot, DB_RELATIVE_PATH);
       MemoryDatabase.instance = new MemoryDatabase(dbPath);
+      MemoryDatabase.currentProjectRoot = projectRoot;
+      console.log(`[pi-sub] 📦 Memory database initialized at ${dbPath}`);
     }
     return MemoryDatabase.instance;
   }
@@ -86,15 +117,32 @@ export class MemoryDatabase {
   static getInstanceWithPath(dbFilePath: string): MemoryDatabase {
     if (!MemoryDatabase.instance) {
       MemoryDatabase.instance = new MemoryDatabase(dbFilePath);
+      MemoryDatabase.currentProjectRoot = dirname(dirname(dbFilePath));
     }
     return MemoryDatabase.instance;
   }
 
+  /**
+   * Сбросить singleton и закрыть БД.
+   * Вызывается при session_shutdown или смене проекта.
+   */
   static resetInstance(): void {
     if (MemoryDatabase.instance) {
-      MemoryDatabase.instance.close();
+      try {
+        MemoryDatabase.instance.close();
+      } catch (err) {
+        // Игнорируем ошибки при закрытии (БД может быть уже закрыта)
+      }
       MemoryDatabase.instance = null;
+      MemoryDatabase.currentProjectRoot = null;
     }
+  }
+
+  /**
+   * Получить текущий путь к проекту.
+   */
+  static getCurrentProjectRoot(): string | null {
+    return MemoryDatabase.currentProjectRoot;
   }
 
   getRaw(): Database.Database {
@@ -131,7 +179,6 @@ export class MemoryDatabase {
   }
 
   // Subagent Results
-  // v9.3: Теперь возвращает number (количество затронутых строк)
   saveSubagentResult(data: Parameters<SubagentResultsRepository["save"]>[0]) {
     return this.subagentResults.save(data);
   }
@@ -153,16 +200,20 @@ export class MemoryDatabase {
     return this.sessionFacts.getById(id);
   }
 
-  searchFacts(query: string, limit: number = 10) {
-    return this.sessionFacts.search(query, limit);
+  searchFacts(query: string, limit: number = 10, projectPath?: string | null) {
+    return this.sessionFacts.search(query, limit, projectPath);
   }
 
-  searchFactsLike(pattern: string, limit: number = 10) {
-    return this.sessionFacts.searchLike(pattern, limit);
+  searchFactsLike(pattern: string, limit: number = 10, projectPath?: string | null) {
+    return this.sessionFacts.searchLike(pattern, limit, projectPath);
   }
 
-  getRecentFacts(limit: number = 20) {
-    return this.sessionFacts.getRecent(limit);
+  getRecentFacts(limit: number = 20, projectPath?: string | null) {
+    return this.sessionFacts.getRecent(limit, projectPath);
+  }
+
+  getFactsByProject(projectPath: string) {
+    return this.sessionFacts.getByProject(projectPath);
   }
 
   purgeOldFacts(daysOld: number = 30) {

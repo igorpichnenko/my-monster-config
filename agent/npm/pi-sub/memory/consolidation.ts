@@ -2,6 +2,8 @@
  * consolidation.ts — Автоматическая консолидация похожих записей в памяти.
  * 
  * Находит дубликаты и похожие записи, сливает их в одну.
+ * 
+ * v11: Консолидирует только факты из одного проекта
  */
 
 import { MemoryDatabase, type SessionFact } from "./database.js";
@@ -97,6 +99,9 @@ function mergeFacts(facts: SessionFact[]): string {
 
 /**
  * Выполняет консолидацию записей в БД.
+ * 
+ * v11: Если указан projectPath — консолидирует только факты этого проекта.
+ *      Иначе — консолидирует все факты (для обратной совместимости).
  */
 export function consolidateMemory(
   db: MemoryDatabase,
@@ -104,9 +109,10 @@ export function consolidateMemory(
     threshold?: number;
     maxRecords?: number;
     dryRun?: boolean;
+    projectPath?: string;
   } = {}
 ): ConsolidationResult {
-  const { threshold = 0.7, maxRecords = 1000, dryRun = false } = options;
+  const { threshold = 0.7, maxRecords = 1000, dryRun = false, projectPath } = options;
   
   const stats = db.getStats();
   
@@ -115,10 +121,21 @@ export function consolidateMemory(
     return { groupsFound: 0, recordsMerged: 0, recordsDeleted: 0 };
   }
   
-  console.log(`[pi-sub] 🔄 Starting consolidation of ${stats.sessionFacts} facts...`);
+  // v11: Получаем факты только для текущего проекта
+  const facts = projectPath 
+    ? db.getFactsByProject(projectPath).slice(0, maxRecords)
+    : db.getRecentFacts(maxRecords);
   
-  // Получаем все записи
-  const facts = db.getRecentFacts(maxRecords);
+  if (facts.length < 100) {
+    console.log(`[pi-sub] 🔄 Not enough records to consolidate (${facts.length} < 100)`);
+    return { groupsFound: 0, recordsMerged: 0, recordsDeleted: 0 };
+  }
+  
+  console.log(
+    `[pi-sub] 🔄 Starting consolidation of ${facts.length} facts` +
+    (projectPath ? ` for project ${projectPath}` : '') +
+    `...`
+  );
   
   // Находим группы похожих записей
   const groups = findSimilarGroups(facts, threshold);

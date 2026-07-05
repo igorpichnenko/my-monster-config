@@ -1,18 +1,14 @@
 /**
  * schema.ts — Схема БД и миграции.
  * 
- * Отвечает за:
- * - Создание таблиц при первой инициализации
- * - Миграции при изменении версии схемы
- * 
  * v10: Добавлен триггер UPDATE для session_facts (критическое исправление)
- *      Убраны старые миграции (v2-v9) — БД пересоздаётся с нуля
+ * v11: Добавлен project_path в session_facts для изоляции между проектами
  */
 
 import type Database from "better-sqlite3";
 
 /** Версия схемы БД. Увеличивать при изменениях структуры. */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Инициализирует схему БД.
@@ -130,19 +126,22 @@ function createAllTables(db: Database.Database): void {
       VALUES (new.rowid, new.agent_type, new.description, new.result);
     END;
 
-    -- Session Facts
+    -- Session Facts (с project_path для изоляции между проектами)
     CREATE TABLE IF NOT EXISTS session_facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
       fact_type TEXT NOT NULL CHECK(fact_type IN ('decision', 'lesson', 'preference', 'architecture', 'api')),
       content TEXT NOT NULL,
-      timestamp INTEGER NOT NULL
+      timestamp INTEGER NOT NULL,
+      project_path TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_session_facts_timestamp 
       ON session_facts(timestamp DESC);
     CREATE INDEX IF NOT EXISTS idx_session_facts_type 
       ON session_facts(fact_type);
+    CREATE INDEX IF NOT EXISTS idx_session_facts_project
+      ON session_facts(project_path);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS session_facts_fts USING fts5(
       fact_type, content,
@@ -331,23 +330,15 @@ function createAllTables(db: Database.Database): void {
 
 /**
  * Выполняет миграции от старой версии до текущей.
- * 
- * v10: Только добавление триггера UPDATE для session_facts
- *      (критическое исправление для consolidation.ts)
- * 
- * Старые миграции (v2-v9) удалены — БД пересоздаётся с нуля.
  */
 function migrate(db: Database.Database, fromVersion: number): void {
   console.log(`[pi-sub] Migrating schema from v${fromVersion} to v${SCHEMA_VERSION}`);
 
   // v10: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавляем триггер UPDATE для session_facts
-  // Без него consolidation.ts обновляет контент через updateFactContent(),
-  // но FTS5 индекс остаётся старым → поиск возвращает устаревшие данные
   if (fromVersion < 10) {
     console.log(`[pi-sub] Migrating to v10: Adding session_facts UPDATE trigger (CRITICAL FIX)`);
     
     db.exec(`
-      -- Добавляем триггер UPDATE для session_facts
       CREATE TRIGGER IF NOT EXISTS session_facts_au AFTER UPDATE ON session_facts BEGIN
         INSERT INTO session_facts_fts(session_facts_fts, rowid, fact_type, content)
         VALUES ('delete', old.id, old.fact_type, old.content);
@@ -355,13 +346,25 @@ function migrate(db: Database.Database, fromVersion: number): void {
         VALUES (new.id, new.fact_type, new.content);
       END;
 
-      -- Перестраиваем FTS5 индекс для session_facts
-      -- Это синхронизирует индекс с текущим состоянием таблицы
-      -- (важно для записей, которые были обновлены до добавления триггера)
       INSERT INTO session_facts_fts(session_facts_fts) VALUES('rebuild');
     `);
     
     console.log(`[pi-sub] ✅ session_facts UPDATE trigger added, FTS5 index rebuilt`);
+  }
+
+  // v11: Добавляем project_path в session_facts
+  if (fromVersion < 11) {
+    console.log(`[pi-sub] Migrating to v11: Adding project_path to session_facts`);
+    
+    const columns = db.prepare("PRAGMA table_info(session_facts)").all() as Array<{ name: string }>;
+    
+    if (!columns.some(c => c.name === "project_path")) {
+      db.exec(`
+        ALTER TABLE session_facts ADD COLUMN project_path TEXT;
+        CREATE INDEX IF NOT EXISTS idx_session_facts_project ON session_facts(project_path);
+      `);
+      console.log(`[pi-sub] ✅ project_path column added to session_facts`);
+    }
   }
 
   db.prepare("UPDATE schema_version SET version = ?").run(SCHEMA_VERSION);

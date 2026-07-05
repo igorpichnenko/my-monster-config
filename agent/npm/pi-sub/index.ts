@@ -15,6 +15,7 @@
  * Phase 11: Failure Memory — память о неудачах
  * Phase 12: Deduplication + Priority System
  * Phase 13: Automatic Purge (weekly, selective)
+ * v11: Project isolation — факты изолированы между проектами
  */
 
 import { dirname, join } from "node:path";
@@ -31,6 +32,7 @@ import {
 import { MemoryDatabase } from "./memory/database.js";
 import {
   getSessionMemory,
+  resetSessionMemory,
   type SessionMemory,
 } from "./memory/session-memory.js";
 import type { PiSubContext } from "./types/pi-sub-context.js";
@@ -142,7 +144,13 @@ export default function (pi: ExtensionAPI) {
       const sessionId = `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       sessionMemory.setSessionId(sessionId);
 
-      console.log(`[pi-sub] 🧠 Session memory initialized (ID: ${sessionId})`);
+      // v11: Устанавливаем путь к проекту
+      const projectRoot = MemoryDatabase.getCurrentProjectRoot();
+      if (projectRoot) {
+        sessionMemory.setProjectPath(projectRoot);
+      }
+
+      console.log(`[pi-sub] 🧠 Session memory initialized (ID: ${sessionId}, Project: ${projectRoot})`);
     }
   } catch (err) {
     console.error(`[pi-sub] ❌ Failed to initialize session memory:`, err);
@@ -412,7 +420,14 @@ export default function (pi: ExtensionAPI) {
         event?.sessionId ||
         `session-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
       sessionMemory.setSessionId(newSessionId);
-      console.log(`[pi-sub] 🧠 Session ID updated: ${newSessionId}`);
+      
+      // v11: Устанавливаем путь к проекту (getInstance уже адаптирует singleton)
+      const projectRoot = MemoryDatabase.getCurrentProjectRoot();
+      if (projectRoot) {
+        sessionMemory.setProjectPath(projectRoot);
+      }
+      
+      console.log(`[pi-sub] 🧠 Session ID updated: ${newSessionId}, Project: ${projectRoot}`);
     }
 
     // ФАЗА 13: Автоматический purge (раз в неделю, выборочный)
@@ -438,7 +453,7 @@ export default function (pi: ExtensionAPI) {
             const deletedCompressed = memoryDb.purgeOldCompressedResults(30);
             
             // НЕ очищаем:
-            // - session_facts (долгосрочная память)
+            // - session_facts (долгосрочная память, изолирована по project_path)
             // - subagent_results (история работы)
             // - failures (память о неудачах)
             
@@ -470,7 +485,9 @@ export default function (pi: ExtensionAPI) {
       if (stats.sessionFacts > 1000) {
         console.log(`[pi-sub] 🔄 Auto-consolidation triggered (${stats.sessionFacts} facts)`);
         try {
-          consolidateMemory(memoryDb, { threshold: 0.7 });
+          // v11: Передаём projectPath для изоляции между проектами
+          const projectRoot = MemoryDatabase.getCurrentProjectRoot() || undefined;
+          consolidateMemory(memoryDb, { threshold: 0.7, projectPath: projectRoot });
         } catch (err) {
           console.error(`[pi-sub] ❌ Auto-consolidation failed:`, err);
         }
@@ -486,15 +503,21 @@ export default function (pi: ExtensionAPI) {
     manager.abortAll();
     manager.dispose();
     
-    // Закрываем БД
+    // Закрываем БД И сбрасываем singleton
     if (memoryDb) {
       try {
         memoryDb.close();
         console.log(`[pi-sub] 📦 Memory database closed`);
       } catch (err) {
         console.error(`[pi-sub] ❌ Failed to close memory database:`, err);
+      } finally {
+        // КРИТИЧНО: Сбрасываем singleton, чтобы getInstance() создал новый экземпляр
+        MemoryDatabase.resetInstance();
       }
     }
+    
+    // v11: Сбрасываем SessionMemory singleton
+    resetSessionMemory();
   });
 
   pi.on("tool_execution_start", async (_event, ctx) => {
@@ -579,6 +602,7 @@ export default function (pi: ExtensionAPI) {
           sessionId: sessionMemory.getSessionId(),
           factType: "lesson",
           content: `User correction: ${text.slice(0, 200)}`,
+          projectPath: sessionMemory.getProjectPath() || undefined,
         });
         
         console.log(`[pi-sub] ⚠️ Saved correction as lesson`);
@@ -651,7 +675,7 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // ФАЗА 4A: Извлечение фактов
+      // ФАЗА 4A: Извлечение фактов (projectPath передаётся автоматически через SessionMemory)
       const count = sessionMemory.extractAndSaveFacts(messages);
       if (count > 0) {
         console.log(`[pi-sub] 🧠 Extracted ${count} facts before compaction`);
