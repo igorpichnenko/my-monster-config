@@ -19,7 +19,7 @@
       "optional": true
     }
   },
-  "dependencies": {
-    "pi-memory": "file:../pi-memory"
+  "optionalDependencies": {
+    "pi-memory": "*"
   }
 }
