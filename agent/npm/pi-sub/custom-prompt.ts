@@ -3,16 +3,46 @@
  * Вынесено из index.ts.
  */
 
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 
+/**
+ * Получить путь к pi-coding-agent динамически.
+ * Использует createRequire для ES-модулей.
+ * 
+ * v14: Убран хардкод пути, теперь используется динамическое определение
+ */
 function getPiCodingAgentPath(): string {
   try {
     const require = createRequire(import.meta.url);
     const piPackagePath = require.resolve("@earendil-works/pi-coding-agent/package.json");
-    return require.resolve("@earendil-works/pi-coding-agent/README.md").replace("README.md", "");
+    return dirname(piPackagePath);
   } catch {
-    return "/home/igorp/.nvm/versions/node/v22.23.0/lib/node_modules/@earendil-works/pi-coding-agent";
+    // Fallback: ищем node_modules относительно текущего файла
+    const fallbackPaths = [
+      // Относительно текущего файла (для локальной разработки)
+      join(dirname(new URL(import.meta.url).pathname), "../../node_modules/@earendil-works/pi-coding-agent"),
+      // Относительно process.cwd() (для глобальной установки)
+      join(process.cwd(), "node_modules/@earendil-works/pi-coding-agent"),
+      // Относительно HOME (для nvm)
+      join(process.env.HOME || "", ".nvm/versions/node", process.version, "lib/node_modules/@earendil-works/pi-coding-agent"),
+    ];
+    
+    for (const path of fallbackPaths) {
+      if (existsSync(path)) {
+        return path;
+      }
+    }
+    
+    // Последний fallback: используем require.resolve с другим путём
+    try {
+      const require = createRequire(import.meta.url);
+      return require.resolve("@earendil-works/pi-coding-agent");
+    } catch {
+      // Если ничего не сработало, возвращаем относительный путь
+      return "node_modules/@earendil-works/pi-coding-agent";
+    }
   }
 }
 
