@@ -9,8 +9,10 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0",
-    "@earendil-works/pi-tui": ">=0.74.0"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+     "@earendil-works/pi-agent-core": "*",
+     "@types/better-sqlite3": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-tui": {
@@ -18,11 +20,6 @@
     }
   },
   "dependencies": {
-    "pi-memory": "file:../pi-memory",
-    "@earendil-works/pi-coding-agent": ">=0.74.0"
-  },
-  "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "@earendil-works/pi-agent-core": "0.80.3"
+    "pi-memory": "file:../pi-memory"
   }
 }

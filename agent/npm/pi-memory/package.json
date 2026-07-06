@@ -9,15 +9,15 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.74.0"
+    "@earendil-works/pi-coding-agent": "*"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49",
-    "better-sqlite3": "^12.11.1",
-    "nanoid": "^5.0.0"
+    "@sinclair/typebox": "*",
+    "better-sqlite3": "*",
+    "nanoid": "*"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13",
-    "typescript": "^6.0.3"
+    "@types/better-sqlite3": "*",
+    "typescript": "*"
   }
 }

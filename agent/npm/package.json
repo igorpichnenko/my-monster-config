@@ -8,9 +8,5 @@
     "pi-memory": "file:pi-memory",
     "pi-minimal-web": "file:pi-minimal-web",
     "pi-sub": "file:pi-sub"
-  },
-  "overrides": {
-    "@earendil-works/pi-coding-agent": "^0.80.3",
-    "@earendil-works/pi-agent-core": "^0.80.3"
   }
 }
