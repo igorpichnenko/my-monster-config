@@ -11,11 +11,7 @@ node_modules/
 # === Конфигурация пользователя (локальная) ===
 # Эти файлы содержат персональные пути и URL. 
 # Копии-шаблоны с .template расширением можно использовать для восстановления.
-agent/settings.json
-agent/models.json
-agent/trust.json
-agent/auth.json
-agent/subagents.json
+
 
 # === Временные файлы ===
 *.tmp
