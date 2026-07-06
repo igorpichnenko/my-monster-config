@@ -1,3 +1,5 @@
+/* activity.ts */
+
 export interface ActivityEntry {
 	id: string;
 	type: "api" | "fetch";
@@ -9,14 +11,33 @@ export interface ActivityEntry {
 	error?: string;
 }
 
+export interface RateLimitInfo {
+	used: number;
+	max: number;
+	windowMs: number;
+	oldestTimestamp: number | null;
+}
+
+interface RateLimitConfig {
+	maxRequests: number;
+	windowMs: number;
+}
+
 export class ActivityMonitor {
 	private entries: ActivityEntry[] = [];
 	private readonly maxEntries = 10;
 	private listeners = new Set<() => void>();
 	private nextId = 1;
 
+	// ✅ РЕАЛЬНЫЙ rate limiter (по API типам)
+	private apiTimestamps: number[] = [];
+	private readonly rateLimitConfig: RateLimitConfig = {
+		maxRequests: 100,
+		windowMs: 60 * 1000, // 100 запросов в минуту
+	};
+
 	logStart(partial: Omit<ActivityEntry, "id" | "startTime" | "status">): string {
-		const id = `act-${this.nextId++}`;
+		const id = this.generateId();
 		const entry: ActivityEntry = {
 			...partial,
 			id,
@@ -27,6 +48,13 @@ export class ActivityMonitor {
 		if (this.entries.length > this.maxEntries) {
 			this.entries.shift();
 		}
+
+		// Записываем timestamp для rate limiting (только для API)
+		if (partial.type === "api") {
+			this.apiTimestamps.push(Date.now());
+			this.pruneOldTimestamps();
+		}
+
 		this.notify();
 		return id;
 	}
@@ -51,13 +79,19 @@ export class ActivityMonitor {
 
 	notify(): void {
 		for (const cb of this.listeners) {
-			try { cb(); } catch { /* ignore */ }
+			try {
+				cb();
+			} catch {
+				/* игнорируем ошибки в listener'ах, чтобы не сломать notify-цикл */
+			}
 		}
 	}
 
 	onUpdate(callback: () => void): () => void {
 		this.listeners.add(callback);
-		return () => this.listeners.delete(callback);
+		return () => {
+			this.listeners.delete(callback);
+		};
 	}
 
 	getEntries(): ActivityEntry[] {
@@ -66,10 +100,43 @@ export class ActivityMonitor {
 
 	clear(): void {
 		this.entries = [];
+		this.notify(); // ✅ Уведомляем подписчиков об очистке
 	}
 
-	getRateLimitInfo(): { used: number; max: number; windowMs: number; oldestTimestamp: number | null } {
-		return { used: 0, max: 1000, windowMs: 0, oldestTimestamp: null };
+	// ✅ Реальная реализация вместо заглушки
+	getRateLimitInfo(): RateLimitInfo {
+		this.pruneOldTimestamps();
+		const now = Date.now();
+		const oldest = this.apiTimestamps.length > 0 ? this.apiTimestamps[0] : null;
+
+		return {
+			used: this.apiTimestamps.length,
+			max: this.rateLimitConfig.maxRequests,
+			windowMs: this.rateLimitConfig.windowMs,
+			oldestTimestamp: oldest,
+		};
+	}
+
+	// ✅ Проверяет, можно ли делать запрос
+	canMakeRequest(): boolean {
+		this.pruneOldTimestamps();
+		return this.apiTimestamps.length < this.rateLimitConfig.maxRequests;
+	}
+
+	// ✅ Защита от переполнения nextId
+	private generateId(): string {
+		// Сбрасываем после достижения MAX_SAFE_INTEGER
+		if (this.nextId >= Number.MAX_SAFE_INTEGER) {
+			this.nextId = 1;
+		}
+		return `act-${this.nextId++}`;
+	}
+
+	private pruneOldTimestamps(): void {
+		const cutoff = Date.now() - this.rateLimitConfig.windowMs;
+		while (this.apiTimestamps.length > 0 && this.apiTimestamps[0] < cutoff) {
+			this.apiTimestamps.shift();
+		}
 	}
 }
 

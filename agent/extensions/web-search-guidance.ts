@@ -1,4 +1,5 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, MessageRenderOptions, ToolCallEvent, ToolResultEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 const GUIDANCE_WEB_SEARCH = (numResults: number) => `
@@ -71,7 +72,7 @@ export default function (pi: ExtensionAPI) {
     warnedTools.clear();
   });
 
-  pi.on("tool_call", (event, ctx) => {
+  pi.on("tool_call", (event: ToolCallEvent, ctx: ExtensionContext) => {
     if (event.toolName === "web_search") {
       const numResults = (event.input as any)?.numResults ?? 2;
       const state = warnedTools.get("web_search") ?? { count: 0, consecutiveCorrectCalls: 0 };
@@ -202,9 +203,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Отслеживаем результаты вызовов
-  pi.on("tool_result", (event, _ctx) => {
-    if (event.toolName === "web_get" && event.result?.details) {
-      const details = event.result.details as any;
+  pi.on("tool_result", (event: ToolResultEvent, _ctx: ExtensionContext) => {
+    if (event.toolName === "web_get" && (event as any).details) {
+      const details = (event as any).details as any;
       const state = warnedTools.get("web_get") ?? { count: 0, consecutiveCorrectCalls: 0 };
       
       state.lastReturnedLength = details.returnedLength;
@@ -213,7 +214,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.registerMessageRenderer("web-guidance", (message, _opts, theme) =>
+  pi.registerMessageRenderer("web-guidance", (message, _opts: MessageRenderOptions, theme: Theme) =>
     new Text(theme.fg("warning", String(message.content)), 0, 0)
   );
 }

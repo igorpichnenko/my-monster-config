@@ -1,1 +1,1 @@
-export { default } from "./loop-police.ts";
+export { default } from "./loop-police.js";

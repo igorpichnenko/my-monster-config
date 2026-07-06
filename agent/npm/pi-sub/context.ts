@@ -3,7 +3,7 @@
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { extractText } from "./context-tools/utils/text-extractor";
+import { extractText } from "../pi-context-tools/utils/text-extractor.js";
 
 /** Extract text from a message content block array. */
 /* export function extractText(content: unknown[]): string {

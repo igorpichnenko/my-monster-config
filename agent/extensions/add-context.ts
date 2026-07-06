@@ -1,10 +1,11 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, MessageRenderOptions } from "@earendil-works/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("add_context", {
     description: "Отправить контекст модели (приостанавливает текущую работу)",
-    handler: async (args, ctx) => {
+    handler: async (args: string, ctx: ExtensionCommandContext) => {
       const text = args.trim();
       if (!text) {
         ctx.ui.notify("❌ Укажи текст после /add_context", "error");
@@ -24,9 +25,9 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  pi.registerMessageRenderer("add-context", (message, _opts, theme) => {
+  pi.registerMessageRenderer("add-context", (message, _opts: MessageRenderOptions, theme: Theme) => {
     return new Text(
-      theme.fg("info", `📝 [add_context] ${String(message.content)}`),
+      theme.fg("success", `📝 [add_context] ${String(message.content)}`),
       0,
       0
     );

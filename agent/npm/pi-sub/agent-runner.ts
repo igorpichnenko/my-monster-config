@@ -23,14 +23,13 @@ import { buildParentContext } from "./context.js";
 import { detectEnv } from "./env.js";
 import { buildAgentPrompt, type PromptExtras } from "./prompts.js";
 import type { SubagentType, ThinkingLevel } from "./types.js";
-import { extractText } from "./context-tools/utils/text-extractor.js";
+import { extractText } from "pi-context-tools/utils/text-extractor.js";
 
-// ---- ФАЗА 4B: Импорт памяти ----
-import { MemoryDatabase } from "./memory/database.js";
-import { getSessionMemory } from "./memory/session-memory.js";
+// ---- pi-memory imports ----
+import { MemoryDatabase, getSessionMemory, type SessionMemory } from "pi-memory";
 
 // ---- ФАЗА 6: Импорт утилиты для генерации compaction summary ----
-import { generateCompactionDetailedSummary, type CompactionMeta } from "./context-tools/utils/compaction-summary.js";
+import { generateCompactionDetailedSummary, type CompactionMeta } from "pi-context-tools/utils/compaction-summary.js";
 
 export const SUBAGENT_TOOL_NAMES = {
   AGENT: "Agent",
@@ -167,6 +166,7 @@ export interface RunOptions {
   thinkingLevel?: ThinkingLevel;
   cwd?: string;
   configCwd?: string;
+  memoryDb?: MemoryDatabase;
   onToolActivity?: (activity: ToolActivity) => void;
   onTextDelta?: (delta: string, fullText: string) => void;
   onSessionCreated?: (session: AgentSession) => void;
@@ -243,42 +243,44 @@ export async function runAgent(
   let toolNames = getToolNamesForType(type);
 
   // ==========================================================================
-  // ФАЗА 4B: Получение релевантных фактов из памяти
+  // ФАЗА 4B: Получение релевантных фактов из памяти (через injected dependency)
   // ==========================================================================
   let memoryBlock: string | undefined;
-  try {
-    const memoryDb = MemoryDatabase.getInstance();
-    const sessionMemory = getSessionMemory(memoryDb);
-    
-    console.log(`[pi-sub] 🔍 Searching facts for prompt: "${prompt.slice(0, 100)}..."`);
-    
-    const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
-    
-    console.log(`[pi-sub] 🔍 Found ${relevantFacts.length} relevant facts`);
-    for (const fact of relevantFacts) {
-      console.log(`[pi-sub] 🔍   - [${fact.fact_type}] ${fact.content.slice(0, 50)}`);
+  const memoryDb = options.memoryDb ?? MemoryDatabase.getInstance();
+  if (memoryDb) {
+    try {
+      const sessionMemory = getSessionMemory(memoryDb);
+      
+      console.log(`[pi-sub] 🔍 Searching facts for prompt: "${prompt.slice(0, 100)}..."`);
+      
+      const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
+      
+      console.log(`[pi-sub] 🔍 Found ${relevantFacts.length} relevant facts`);
+      for (const fact of relevantFacts) {
+        console.log(`[pi-sub] 🔍   - [${fact.fact_type}] ${fact.content.slice(0, 50)}`);
+      }
+      
+      if (relevantFacts.length > 0) {
+        const iconMap: Record<string, string> = {
+          decision: "🎯",
+          lesson: "💡",
+          preference: "⭐",
+          architecture: "🏗️",
+          api: "🔌",
+        };
+        
+        const factLines = relevantFacts.map((fact: any) => {
+          const icon = iconMap[fact.fact_type] || "📝";
+          return `- ${icon} [${fact.fact_type}] ${fact.content}`;
+        });
+        
+        memoryBlock = `# Session Memory\nRelevant context from previous sessions:\n${factLines.join("\n")}`;
+        
+        console.log(`[pi-sub] 🧠 Injected ${relevantFacts.length} relevant facts into subagent prompt`);
+      }
+    } catch (err) {
+      console.error(`[pi-sub] ❌ Failed to get relevant facts:`, err);
     }
-    
-    if (relevantFacts.length > 0) {
-      const iconMap: Record<string, string> = {
-        decision: "🎯",
-        lesson: "💡",
-        preference: "⭐",
-        architecture: "🏗️",
-        api: "🔌",
-      };
-      
-      const factLines = relevantFacts.map((fact: any) => {
-        const icon = iconMap[fact.fact_type] || "📝";
-        return `- ${icon} [${fact.fact_type}] ${fact.content}`;
-      });
-      
-      memoryBlock = `# Session Memory\nRelevant context from previous sessions:\n${factLines.join("\n")}`;
-      
-      console.log(`[pi-sub] 🧠 Injected ${relevantFacts.length} relevant facts into subagent prompt`);
-    }
-  } catch (err) {
-    console.error(`[pi-sub] ❌ Failed to get relevant facts:`, err);
   }
 
   let systemPrompt: string;
@@ -543,13 +545,17 @@ export async function runAgent(
         }
       }
       
-      options.onCompaction?.({ 
-        reason: event.reason, 
-        tokensBefore: event.result.tokensBefore,
-        summary: event.result.summary,
-        detailedSummary,
-        meta,
-      });
+      // Guard: event.result may be truthy but missing summary/tokensBefore
+      // Guard: event.reason may be undefined on compaction_end events
+      if (event.result && typeof event.result.summary === 'string') {
+        options.onCompaction?.({ 
+          reason: event.reason ?? 'threshold',
+          tokensBefore: event.result.tokensBefore,
+          summary: event.result.summary,
+          detailedSummary,
+          meta,
+        });
+      }
     }
   });
 
@@ -629,13 +635,17 @@ export async function resumeAgent(
             }
           }
           
-          options.onCompaction?.({ 
-            reason: event.reason, 
-            tokensBefore: event.result.tokensBefore,
-            summary: event.result.summary,
-            detailedSummary,
-            meta,
-          });
+          // Guard: event.result may be truthy but missing summary/tokensBefore
+          // Guard: event.reason may be undefined on compaction_end events
+          if (event.result && typeof event.result.summary === 'string') {
+            options.onCompaction?.({ 
+              reason: event.reason ?? 'threshold',
+              tokensBefore: event.result.tokensBefore,
+              summary: event.result.summary,
+              detailedSummary,
+              meta,
+            });
+          }
         }
       })
     : () => {};

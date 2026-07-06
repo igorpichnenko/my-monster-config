@@ -2,8 +2,15 @@
   "name": "pi-extensions",
   "private": true,
   "dependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.3",
     "loop-police": "file:loop-police",
+    "pi-context-tools": "file:pi-context-tools",
+    "pi-memory": "file:pi-memory",
     "pi-minimal-web": "file:pi-minimal-web",
     "pi-sub": "file:pi-sub"
+  },
+  "overrides": {
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-agent-core": "^0.80.3"
   }
 }

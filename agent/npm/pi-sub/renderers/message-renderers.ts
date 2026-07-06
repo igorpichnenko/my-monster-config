@@ -2,7 +2,8 @@
  * message-renderers.ts — Кастомные рендереры сообщений.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, MessageRenderOptions, Theme } from "@earendil-works/pi-coding-agent";
+import type { Component } from "@earendil-works/pi-tui";
 import { Text } from "@earendil-works/pi-tui";
 import {
   formatMs,
@@ -13,9 +14,9 @@ import type { NotificationDetails } from "../types.js";
 
 export function registerRenderers(pi: ExtensionAPI): void {
   // Subagent result renderer
-  pi.registerMessageRenderer("subagent-result", (message, _opts, theme) => {
+  pi.registerMessageRenderer("subagent-result", (message: { content: unknown }, _opts: MessageRenderOptions, theme: Theme) => {
     return new Text(
-      theme.fg("info", `🤖 [Subagent Result] ${String(message.content)}`),
+      theme.fg("text", `🤖 [Subagent Result] ${String(message.content)}`),
       0,
       0
     );

@@ -1,3 +1,35 @@
+# === Локальные данные и кэш ===
+memory/
+logs/
 agent/sessions/
-memory
-logs
+
+# === npm зависимости ===
+agent/npm/*/node_modules/
+agent/npm/loop-police/node_modules/
+node_modules/
+
+# === Конфигурация пользователя (локальная) ===
+# Эти файлы содержат персональные пути и URL. 
+# Копии-шаблоны с .template расширением можно использовать для восстановления.
+agent/settings.json
+agent/models.json
+agent/trust.json
+agent/auth.json
+agent/subagents.json
+
+# === Временные файлы ===
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# === OS-specific ===
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# === IDE (если нужно) ===
+.vscode/
+.idea/
+*.code-workspace

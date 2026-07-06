@@ -1,3 +1,4 @@
+/* extract.ts */
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
@@ -43,85 +44,143 @@ function abortedResult(url: string): ExtractedContent {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// 🎯 КОНВЕРТАЦИЯ КОДИРОВОК — ПРАВИЛЬНАЯ ВЕРСИЯ
+// 🎯 КОНВЕРТАЦИЯ КОДИРОВОК — ИСПРАВЛЕННАЯ ВЕРСИЯ
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Извлекает charset из Content-Type header
- * Пример: "text/html; charset=windows-1251" → "windows-1251"
- */
 function getCharsetFromHeader(contentType: string | null): string | null {
 	if (!contentType) return null;
 	const match = contentType.match(/charset\s*=\s*["']?([^"';\s]+)/i);
 	return match ? match[1].trim().toLowerCase() : null;
 }
 
-/**
- * Проверяет, является ли буфер валидным UTF-8
- */
 function isValidUtf8(buffer: Buffer): boolean {
 	let i = 0;
+	let nonAsciiCount = 0;
 	while (i < buffer.length) {
 		const byte = buffer[i];
-		if (byte <= 0x7F) {
+		if (byte <= 0x7f) {
 			i++;
-		} else if (byte >= 0xC2 && byte <= 0xDF) {
-			if (i + 1 >= buffer.length || (buffer[i + 1] & 0xC0) !== 0x80) return false;
+		} else if (byte >= 0xc2 && byte <= 0xdf) {
+			if (i + 1 >= buffer.length || (buffer[i + 1] & 0xc0) !== 0x80) return false;
 			i += 2;
-		} else if (byte >= 0xE0 && byte <= 0xEF) {
-			if (i + 2 >= buffer.length || (buffer[i + 1] & 0xC0) !== 0x80 || (buffer[i + 2] & 0xC0) !== 0x80) return false;
+			nonAsciiCount++;
+		} else if (byte >= 0xe0 && byte <= 0xef) {
+			if (
+				i + 2 >= buffer.length ||
+				(buffer[i + 1] & 0xc0) !== 0x80 ||
+				(buffer[i + 2] & 0xc0) !== 0x80
+			)
+				return false;
 			i += 3;
-		} else if (byte >= 0xF0 && byte <= 0xF4) {
-			if (i + 3 >= buffer.length || (buffer[i + 1] & 0xC0) !== 0x80 || (buffer[i + 2] & 0xC0) !== 0x80 || (buffer[i + 3] & 0xC0) !== 0x80) return false;
+			nonAsciiCount++;
+		} else if (byte >= 0xf0 && byte <= 0xf4) {
+			if (
+				i + 3 >= buffer.length ||
+				(buffer[i + 1] & 0xc0) !== 0x80 ||
+				(buffer[i + 2] & 0xc0) !== 0x80 ||
+				(buffer[i + 3] & 0xc0) !== 0x80
+			)
+				return false;
 			i += 4;
+			nonAsciiCount++;
 		} else {
 			return false;
 		}
 	}
+	// Если валидный UTF-8, но в основном ASCII — это действительно UTF-8
+	// Если много non-ASCII и все валидно — скорее всего UTF-8
 	return true;
 }
 
-/**
- * Определяет кодировку по BOM (Byte Order Mark)
- */
 function detectBom(buffer: Buffer): string | null {
-	if (buffer.length >= 3 && buffer[0] === 0xEF && buffer[1] === 0xBB && buffer[2] === 0xBF) return "utf-8";
-	if (buffer.length >= 2 && buffer[0] === 0xFF && buffer[1] === 0xFE) return "utf-16le";
-	if (buffer.length >= 2 && buffer[0] === 0xFE && buffer[1] === 0xFF) return "utf-16be";
+	if (buffer.length >= 3 && buffer[0] === 0xef && buffer[1] === 0xbb && buffer[2] === 0xbf)
+		return "utf-8";
+	if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return "utf-16le";
+	if (buffer.length >= 2 && buffer[0] === 0xfe && buffer[1] === 0xff) return "utf-16be";
 	return null;
 }
 
 /**
- * Главная функция: декодирует сырые байты в строку с правильной кодировкой
- * 
- * Приоритет:
- * 1. BOM (если есть)
- * 2. charset из Content-Type
- * 3. Автоопределение (валидность UTF-8)
- * 4. Fallback на windows-1251 (для рунета)
+ * ✅ Детектирует артефакты неверного декодирования.
+ * Например, при декодировании UTF-8 текста как windows-1251 появляются
+ * характерные последовательности типа "Р—Р°РїРёСЃРё" (бессмысленная кириллица).
  */
+function hasDecodingArtifacts(text: string): boolean {
+	if (text.length === 0) return false;
+
+	// Проверяем частоту "мусорных" символов
+	// В нормальной кириллице буквы распределены неравномерно,
+	// в артефактах — почти равновероятны
+	const cyrillicChars = text.match(/[а-яА-ЯёЁ]/g) || [];
+	if (cyrillicChars.length === 0) return false;
+
+	// Считаем количество уникальных кириллических букв
+	const unique = new Set(cyrillicChars.map((c) => c.toLowerCase()));
+
+	// В нормальной кириллице на 100 символов обычно 20-30 уникальных букв
+	// В артефактах — почти все 33 буквы встречаются часто
+	// Если уникальных > 28 и текст короткий — скорее всего артефакты
+	if (cyrillicChars.length > 20 && unique.size > 28) {
+		const ratio = unique.size / cyrillicChars.length;
+		if (ratio > 0.4 && cyrillicChars.length < 200) {
+			return true;
+		}
+	}
+
+	// Эвристика: частые "Р" в начале слов (признак UTF-8 → CP1251)
+	const badPatterns = [
+		/Р[А-Яа-я]{2,}/g,
+		/С[А-Яа-я]{2,}/g,
+		/РЎ/g,
+		/Р—/g,
+	];
+	let badMatches = 0;
+	for (const pattern of badPatterns) {
+		const matches = text.match(pattern) || [];
+		badMatches += matches.length;
+	}
+	if (badMatches > 5) return true;
+
+	return false;
+}
+
 function decodeBuffer(buffer: Buffer, declaredCharset: string | null): string {
-	// 1. Проверяем BOM
+	// 1. BOM имеет высший приоритет
 	const bom = detectBom(buffer);
 	if (bom) {
 		if (bom === "utf-8") return buffer.toString("utf-8");
 		if (iconv.encodingExists(bom)) return iconv.decode(buffer, bom);
 	}
 
-	// 2. Если сервер явно указал НЕ UTF-8 кодировку — используем её
-	if (declaredCharset && declaredCharset !== "utf-8" && declaredCharset !== "utf8") {
-		if (iconv.encodingExists(declaredCharset)) {
-			return iconv.decode(buffer, declaredCharset);
+	// 2. Если declared charset и он НЕ UTF-8 — пробуем его
+	if (
+		declaredCharset &&
+		declaredCharset !== "utf-8" &&
+		declaredCharset !== "utf8" &&
+		iconv.encodingExists(declaredCharset)
+	) {
+		const decoded = iconv.decode(buffer, declaredCharset);
+		if (!hasDecodingArtifacts(decoded)) {
+			return decoded;
 		}
 	}
 
-	// 3. Проверяем, валидный ли это UTF-8
+	// 3. Пробуем UTF-8 (если валидный)
 	if (isValidUtf8(buffer)) {
 		return buffer.toString("utf-8");
 	}
 
-	// 4. Не UTF-8 и нет явной кодировки → предполагаем windows-1251
-	// (для рунета это работает в 95% случаев)
+	// 4. Пробуем популярные кодировки по порядку
+	const candidates = ["windows-1251", "koi8-r", "iso-8859-5", "windows-1252"];
+	for (const encoding of candidates) {
+		if (!iconv.encodingExists(encoding)) continue;
+		const decoded = iconv.decode(buffer, encoding);
+		if (!hasDecodingArtifacts(decoded)) {
+			return decoded;
+		}
+	}
+
+	// 5. Fallback: windows-1251
 	return iconv.decode(buffer, "windows-1251");
 }
 
@@ -133,19 +192,26 @@ async function extractWithJinaReader(
 	url: string,
 	signal?: AbortSignal,
 ): Promise<ExtractedContent | null> {
+	// ✅ Проверка: уже отменено?
+	if (signal?.aborted) return abortedResult(url);
+
 	const jinaUrl = JINA_READER_BASE + url;
 	const activityId = activityMonitor.logStart({ type: "api", query: `jina: ${url}` });
+
+	// ✅ Создаем controller для корректной очистки таймаута
+	const controller = new AbortController();
+	const timeoutId = setTimeout(() => controller.abort(), JINA_TIMEOUT_MS);
+
+	const onAbort = () => controller.abort();
+	signal?.addEventListener("abort", onAbort);
 
 	try {
 		const res = await fetch(jinaUrl, {
 			headers: {
-				"Accept": "text/markdown",
+				Accept: "text/markdown",
 				"X-No-Cache": "true",
 			},
-			signal: AbortSignal.any([
-				AbortSignal.timeout(JINA_TIMEOUT_MS),
-				...(signal ? [signal] : []),
-			]),
+			signal: controller.signal,
 		});
 
 		if (!res.ok) {
@@ -161,22 +227,31 @@ async function extractWithJinaReader(
 
 		const markdownPart = content.slice(contentStart + 17).trim();
 
-		if (markdownPart.length < 100 ||
+		if (
+			markdownPart.length < 100 ||
 			markdownPart.startsWith("Loading...") ||
-			markdownPart.startsWith("Please enable JavaScript")) {
+			markdownPart.startsWith("Please enable JavaScript")
+		) {
 			return null;
 		}
 
-		const title = extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
+		const title =
+			extractHeadingTitle(markdownPart) ?? (new URL(url).pathname.split("/").pop() || url);
 		return { url, title, content: markdownPart, error: null };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		if (message.toLowerCase().includes("abort")) {
+		const message = errorMessage(err);
+		if (isAbortError(err)) {
 			activityMonitor.logComplete(activityId, 0);
 		} else {
 			activityMonitor.logError(activityId, message);
 		}
 		return null;
+	} finally {
+		// ✅ Очистка в любом случае
+		clearTimeout(timeoutId);
+		if (signal) {
+			signal.removeEventListener("abort", onAbort);
+		}
 	}
 }
 
@@ -190,7 +265,7 @@ export async function extractContent(
 	options?: ExtractOptions,
 ): Promise<ExtractedContent> {
 	if (signal?.aborted) {
-		return { url, title: "", content: "", error: "Aborted" };
+		return abortedResult(url);
 	}
 
 	try {
@@ -244,15 +319,20 @@ async function extractViaHttp(
 	const controller = new AbortController();
 	const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-	const onAbort = () => controller.abort();
-	signal?.addEventListener("abort", onAbort);
+	// ✅ Создаем обработчик только если signal есть
+	const onAbort = signal ? () => controller.abort() : null;
+	if (onAbort && signal) {
+		signal.addEventListener("abort", onAbort);
+	}
 
 	try {
 		const response = await fetch(url, {
 			signal: controller.signal,
 			headers: {
-				"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-				"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+				"User-Agent":
+					"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+				Accept:
+					"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
 				"Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
 				"Cache-Control": "no-cache",
 				"Sec-Fetch-Dest": "document",
@@ -261,6 +341,7 @@ async function extractViaHttp(
 				"Sec-Fetch-User": "?1",
 				"Upgrade-Insecure-Requests": "1",
 			},
+			redirect: "follow", // ✅ Явно разрешаем редиректы
 		});
 
 		if (!response.ok) {
@@ -277,10 +358,14 @@ async function extractViaHttp(
 		const declaredCharset = getCharsetFromHeader(contentType);
 
 		// Skip binary/unsupported types
-		if (contentType.includes("application/octet-stream") ||
+		if (
+			contentType.includes("application/octet-stream") ||
 			contentType.includes("image/") ||
 			contentType.includes("audio/") ||
-			contentType.includes("application/zip")) {
+			contentType.includes("video/") ||
+			contentType.includes("application/zip") ||
+			contentType.includes("application/pdf")
+		) {
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -290,15 +375,11 @@ async function extractViaHttp(
 			};
 		}
 
-		// ═══════════════════════════════════════════════════════
-		// 🎯 КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: читаем СЫРЫЕ БАЙТЫ
-		// ═══════════════════════════════════════════════════════
 		const buffer = Buffer.from(await response.arrayBuffer());
-		
-		// Декодируем с правильной кодировкой
 		const text = decodeBuffer(buffer, declaredCharset);
 
-		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
+		const isHTML =
+			contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {
 			activityMonitor.logComplete(activityId, response.status);
@@ -316,15 +397,10 @@ async function extractViaHttp(
 			const errorMsg = jsRendered
 				? "Page appears to be JavaScript-rendered (content loads dynamically)"
 				: "Could not extract readable content from HTML structure";
-			return {
-				url,
-				title: "",
-				content: "",
-				error: errorMsg,
-			};
+			return { url, title: "", content: "", error: errorMsg };
 		}
 
-		const markdown = turndown.turndown(article.content);
+		const markdown = turndown.turndown(article.content ?? "");
 		activityMonitor.logComplete(activityId, response.status);
 
 		if (markdown.length < MIN_USEFUL_CONTENT) {
@@ -340,16 +416,19 @@ async function extractViaHttp(
 
 		return { url, title: article.title || "", content: markdown, error: null };
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		if (message.toLowerCase().includes("abort")) {
+		const message = errorMessage(err);
+		if (isAbortError(err)) {
 			activityMonitor.logComplete(activityId, 0);
 		} else {
 			activityMonitor.logError(activityId, message);
 		}
 		return { url, title: "", content: "", error: message };
 	} finally {
+		// ✅ Гарантированная очистка
 		clearTimeout(timeoutId);
-		signal?.removeEventListener("abort", onAbort);
+		if (onAbort && signal) {
+			signal.removeEventListener("abort", onAbort);
+		}
 	}
 }
 

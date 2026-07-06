@@ -4,14 +4,13 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentManager } from "../agent-manager.js";
-import type { MemoryDatabase } from "../memory/database.js";
-import type { SessionMemory } from "../memory/session-memory.js";
+import type { MemoryDatabase, SessionMemory } from "pi-memory";
 import type { AgentActivity } from "../ui/agent-widget.js";
 import type { AgentWidget } from "../ui/agent-widget.js";
 
 export interface PiSubContext {
   pi: ExtensionAPI;
-  memoryDb: MemoryDatabase;
+  memoryDb: MemoryDatabase | null;
   sessionMemory: SessionMemory | null;
   manager: AgentManager;
   widget: AgentWidget;

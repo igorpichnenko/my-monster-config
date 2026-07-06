@@ -1,7 +1,8 @@
 {
   "name": "pi-sub",
-  "version": "0.1",
+  "version": "0.1.0",
   "type": "module",
+  "main": "./index.ts",
   "pi": {
     "extensions": [
       "./index.ts"
@@ -13,11 +14,10 @@
     "@earendil-works/pi-tui": ">=0.74.0"
   },
   "dependencies": {
-    "@sinclair/typebox": "^0.34.49",
-    "better-sqlite3": "^12.11.1",
-    "nanoid": "^5.0.0"
+    "pi-context-tools": "file:../pi-context-tools",
+    "pi-memory": "file:../pi-memory"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^7.6.13"
+    "typescript": "^6.0.3"
   }
 }
