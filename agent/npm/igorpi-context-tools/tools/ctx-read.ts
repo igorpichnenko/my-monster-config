@@ -1,8 +1,9 @@
 /**
  * ctx-read.ts — Инструмент read с сохранением контекста.
  * 
- * Phase 12: Deduplication + Priority System
- * - При повторном чтении того же файла — возвращает существующий ID
+ * Phase 14: File-based Deduplication
+ * - При чтении того же файла — обновляет существующую запись (не создаёт новую)
+ * - Предотвращает рост БД при многократном чтении/переписывании файлов
  * - Вычисляет приоритет для сортировки в ctx_search
  */
 
@@ -56,13 +57,14 @@ export async function executeCtxRead(
         args: JSON.stringify({ path, offset, limit }),
         output: content,
         summary,
+        filePath: path,
       });
       
       const emoji = priorityEmoji(result.priority);
       
       if (result.isNew) {
         // Новый вывод — сохраняем
-        logger.info(`Saved to DB with ID: ${result.id}, priority: ${result.priority}`);
+        logger.info(`New file saved to DB with ID: ${result.id}, priority: ${result.priority}`);
         return (
           `${result.summary}\n\n` +
           `${emoji} Полное содержимое файла сохранено (ID: ${result.id}, priority: ${result.priority}). ` +
@@ -70,7 +72,7 @@ export async function executeCtxRead(
         );
       } else {
         // Дубликат — используем существующий
-        logger.info(`Duplicate detected, reusing ID: ${result.id}, priority: ${result.priority}`);
+        logger.info(`File already in DB (ID: ${result.id}), reusing — content updated in-place`);
         return (
           `${result.summary}\n\n` +
           `♻️ Файл уже сохранён (ID: ${result.id}, priority: ${result.priority}). ` +

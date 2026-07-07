@@ -187,6 +187,14 @@ export class MemoryDatabase {
     return this.toolOutputs.purgeOld(daysOld);
   }
 
+  /**
+   * Удаляет дубликаты для одного и того же file_path.
+   * Оставляет только запись с последним timestamp.
+   */
+  deduplicateToolOutputsByFilePath(): number {
+    return this.toolOutputs.deduplicateByFilePath();
+  }
+
   // Subagent Results
   saveSubagentResult(data: Parameters<SubagentResultsRepository["save"]>[0]) {
     return this.subagentResults.save(data);

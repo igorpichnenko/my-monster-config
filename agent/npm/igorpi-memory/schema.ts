@@ -1,88 +1,17 @@
 /**
- * schema.ts — Схема БД и миграции.
+ * schema.ts — Схема БД.
  * 
- * v10: Добавлен триггер UPDATE для session_facts (критическое исправление)
- * v11: Добавлен project_path в session_facts для изоляции между проектами
+ * Создаёт все таблицы при инициализации.
+ * Без миграций и проверки версии — БД создаётся с нуля.
  */
 
 import type Database from "better-sqlite3";
 
-/** Версия схемы БД. Увеличивать при изменениях структуры. */
-export const SCHEMA_VERSION = 1;
-
 /**
  * Инициализирует схему БД.
- * Если БД пустая — создаёт все таблицы.
- * Если версия устарела — запускает миграции.
+ * Создаёт все таблицы если они не существуют.
  */
 export function initSchema(db: Database.Database): void {
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS schema_version (
-      version INTEGER PRIMARY KEY
-    );
-  `);
-
-  const currentVersion = db.prepare(
-    "SELECT version FROM schema_version LIMIT 1"
-  ).get() as { version: number } | undefined;
-
-  if (!currentVersion) {
-    createAllTables(db);
-    db.prepare("INSERT INTO schema_version (version) VALUES (?)").run(SCHEMA_VERSION);
-  } else {
-    // Миграции: добавляем отсутствующие таблицы
-    ensureTable(db, "failures",
-      `CREATE TABLE IF NOT EXISTS failures (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id TEXT NOT NULL,
-        approach TEXT NOT NULL,
-        error TEXT NOT NULL,
-        reason TEXT,
-        solution TEXT,
-        context TEXT,
-        timestamp INTEGER NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_failures_timestamp ON failures(timestamp DESC);
-      CREATE INDEX IF NOT EXISTS idx_failures_session ON failures(session_id);
-      CREATE VIRTUAL TABLE IF NOT EXISTS failures_fts USING fts5(
-        approach, error, reason, solution, context,
-        content='failures', content_rowid='id', tokenize='unicode61'
-      );
-      CREATE TRIGGER IF NOT EXISTS failures_ai AFTER INSERT ON failures BEGIN
-        INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
-        VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
-      END;
-      CREATE TRIGGER IF NOT EXISTS failures_ad AFTER DELETE ON failures BEGIN
-        INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
-        VALUES ('delete', old.id, old.approach, old.error, old.reason, new.solution, new.context);
-      END;
-      CREATE TRIGGER IF NOT EXISTS failures_au AFTER UPDATE ON failures BEGIN
-        INSERT INTO failures_fts(failures_fts, rowid, approach, error, reason, solution, context)
-        VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
-        INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
-        VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
-      END;`
-    );
-  }
-
-}
-
-/**
- * Проверяет существование таблицы и создаёт если нужно.
- */
-function ensureTable(db: Database.Database, tableName: string, sql: string): void {
-  const exists = db.prepare(
-    `SELECT name FROM sqlite_master WHERE type='table' AND name=?`
-  ).get(tableName) as { name: string } | undefined;
-  if (!exists) {
-    db.exec(sql);
-  }
-}
-
-/**
- * Создаёт все таблицы с нуля.
- */
-function createAllTables(db: Database.Database): void {
   db.exec(`
     -- Tool Outputs (с deduplication и priority)
     CREATE TABLE IF NOT EXISTS tool_outputs (
@@ -94,7 +23,8 @@ function createAllTables(db: Database.Database): void {
       timestamp INTEGER NOT NULL,
       size INTEGER NOT NULL,
       content_hash TEXT,
-      priority INTEGER NOT NULL DEFAULT 5
+      priority INTEGER NOT NULL DEFAULT 5,
+      file_path TEXT
     );
 
     CREATE INDEX IF NOT EXISTS idx_tool_outputs_timestamp 
@@ -105,6 +35,8 @@ function createAllTables(db: Database.Database): void {
       ON tool_outputs(content_hash);
     CREATE INDEX IF NOT EXISTS idx_tool_outputs_priority
       ON tool_outputs(priority DESC);
+    CREATE INDEX IF NOT EXISTS idx_tool_outputs_file_path
+      ON tool_outputs(file_path);
 
     CREATE VIRTUAL TABLE IF NOT EXISTS tool_outputs_fts USING fts5(
       tool_name, args, output, summary,
@@ -205,8 +137,6 @@ function createAllTables(db: Database.Database): void {
       VALUES ('delete', old.id, old.fact_type, old.content);
     END;
 
-    -- v10: КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ — добавлен триггер UPDATE для session_facts
-    -- Без него consolidation.ts обновляет контент, но FTS5 индекс остаётся старым
     CREATE TRIGGER IF NOT EXISTS session_facts_au AFTER UPDATE ON session_facts BEGIN
       INSERT INTO session_facts_fts(session_facts_fts, rowid, fact_type, content)
       VALUES ('delete', old.id, old.fact_type, old.content);

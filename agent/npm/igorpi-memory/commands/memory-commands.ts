@@ -12,6 +12,7 @@
  * - /memory-failures — просмотр записей об ошибках
  * - /memory-subagents — просмотр результатов субагентов
  * - /memory-consolidate — слияние похожих записей
+ * - /memory-dedup — удаление дубликатов tool_outputs по file_path
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
@@ -735,6 +736,37 @@ export function registerMemoryCommands(pi: ExtensionAPI, memoryDb: MemoryDatabas
           `Records deleted: ${result.recordsDeleted}`,
           ``,
           dryRun ? 'Run without --dry-run to apply changes' : 'Consolidation applied',
+        ];
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-dedup — удаление дубликатов tool_outputs по file_path
+  // ==========================================================================
+  pi.registerCommand("memory-dedup", {
+    description: "Deduplicate tool_outputs by file_path: /memory-dedup [--dry-run]\nDeletes duplicate records for the same file, keeping only the latest version.",
+    handler: async (argStr, cmdCtx) => {
+      const dryRun = argStr.includes("--dry-run");
+      
+      try {
+        const statsBefore = memoryDb.getStats();
+        const deleted = memoryDb.deduplicateToolOutputsByFilePath();
+        const statsAfter = memoryDb.getStats();
+        
+        const lines = [
+          `🧹 Deduplicate tool_outputs by file_path ${dryRun ? '(DRY RUN)' : ''}`,
+          ``,
+          `Records deleted: ${deleted}`,
+          ``,
+          `Before: ${statsBefore.toolOutputs} tool outputs`,
+          `After: ${statsAfter.toolOutputs} tool outputs`,
+          ``,
+          `💡 Use /memory-stats to see full statistics.`,
         ];
         
         cmdCtx.ui.notify(lines.join("\n"), "info");
