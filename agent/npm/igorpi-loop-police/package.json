@@ -1,0 +1,13 @@
+{
+  "name": "igorpi-loop-police",
+  "version": "1.3.0",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}

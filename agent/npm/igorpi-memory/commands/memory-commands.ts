@@ -1,0 +1,746 @@
+/**
+ * memory-commands.ts — Команды для работы с памятью (igorpi-memory).
+ * 
+ * Команды:
+ * - /memory-stats — статистика БД
+ * - /memory-test — тест БД (с ROLLBACK)
+ * - /memory-purge — очистка старых данных
+ * - /memory-search — поиск по БД
+ * - /memory-add — добавление факта
+ * - /memory-summaries — просмотр summaries консолидации
+ * - /memory-keywords — просмотр ключевых слов
+ * - /memory-failures — просмотр записей об ошибках
+ * - /memory-subagents — просмотр результатов субагентов
+ * - /memory-consolidate — слияние похожих записей
+ */
+
+import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { MemoryDatabase } from "../database.js";
+import type { SessionMemory } from "../session-memory.js";
+import { consolidateMemory, escapeFts5Query, priorityEmoji, getSessionMemory } from "../index.js";
+
+// ==========================================================================
+// Вспомогательные функции
+// ==========================================================================
+
+function formatFactIcon(factType: string): string {
+  const icons: Record<string, string> = {
+    decision: "🎯",
+    lesson: "💡",
+    preference: "⭐",
+    architecture: "🏗️",
+    api: "🔌",
+  };
+  return icons[factType] || "📝";
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remSec = seconds % 60;
+  if (minutes < 60) return `${minutes}m ${remSec}s`;
+  const hours = Math.floor(minutes / 60);
+  const remMin = minutes % 60;
+  return `${hours}h ${remMin}m`;
+}
+
+function formatStatusEmoji(status: string): string {
+  switch (status) {
+    case 'completed': return '✅';
+    case 'error': return '❌';
+    case 'aborted': return '🛑';
+    default: return '⏸️';
+  }
+}
+
+function getCompactionReasonIcon(reason: string): string {
+  const icons: Record<string, string> = {
+    manual: "🔧",
+    threshold: "📏",
+    overflow: "⚠️",
+  };
+  return icons[reason] || "📦";
+}
+
+function getKeywordCategoryIcon(category: string): string {
+  const icons: Record<string, string> = {
+    file: "📄",
+    decision: "🎯",
+    lesson: "💡",
+  };
+  return icons[category] || "🔑";
+}
+
+// ==========================================================================
+// Регистрация команд
+// ==========================================================================
+
+export function registerMemoryCommands(pi: ExtensionAPI, memoryDb: MemoryDatabase): void {
+  // ==========================================================================
+  // /memory-stats
+  // ==========================================================================
+  pi.registerCommand("memory-stats", {
+    description: "Show memory database statistics",
+    handler: async (_args, cmdCtx) => {
+      try {
+        const stats = memoryDb.getStats();
+        const recentFacts = memoryDb.getRecentFacts(5);
+        const keywordsStats = memoryDb.getKeywordsStats();
+        
+        const lines = [
+          `📊 Memory Database Statistics`,
+          ``,
+          `Tool outputs: ${stats.toolOutputs}`,
+          `Subagent results: ${stats.subagentResults}`,
+          `Session facts: ${stats.sessionFacts}`,
+          `Compressed results: ${stats.compressedResults}`,
+          `Compaction summaries: ${stats.compactionSummaries}`,
+          `Compaction keywords: ${stats.compactionKeywords}`,
+          `Failures: ${stats.failures}`,
+          `Database size: ${stats.dbSizeMb.toFixed(2)} MB`,
+        ];
+        
+        if (keywordsStats.total > 0) {
+          lines.push(``);
+          lines.push(`🔑 Keywords breakdown:`);
+          lines.push(`  📄 Files: ${keywordsStats.byCategory.file}`);
+          lines.push(`  🎯 Decisions: ${keywordsStats.byCategory.decision}`);
+          lines.push(`  💡 Lessons: ${keywordsStats.byCategory.lesson}`);
+          lines.push(`  Unique keywords: ${keywordsStats.uniqueKeywords}`);
+        }
+        
+        if (recentFacts.length > 0) {
+          lines.push(``);
+          lines.push(`📝 Recent facts:`);
+          for (const fact of recentFacts) {
+            const date = new Date(fact.timestamp).toLocaleString();
+            const contentPreview = fact.content.length > 60 
+              ? fact.content.slice(0, 60) + '...' 
+              : fact.content;
+            const icon = formatFactIcon(fact.fact_type);
+            lines.push(`  ${icon} [${fact.fact_type}] ${contentPreview}`);
+            lines.push(`    ${date}`);
+          }
+        } else {
+          lines.push(``);
+          lines.push(`📝 No facts saved yet. Use /memory-add or /memory-test.`);
+        }
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-test (с транзакцией ROLLBACK)
+  // ==========================================================================
+  pi.registerCommand("memory-test", {
+    description: "Test memory database operations (changes are rolled back)",
+    handler: async (_args, cmdCtx) => {
+      const results: string[] = [];
+      const raw = memoryDb.getRaw();
+      
+      try {
+        raw.exec("BEGIN TRANSACTION");
+        
+        try {
+          const toolResult = memoryDb.saveToolOutput({
+            toolName: "bash",
+            args: JSON.stringify({ command: "echo test" }),
+            output: "test output from bash command\nline 2\nline 3",
+            summary: "Test summary: bash command executed",
+          });
+          results.push(`✅ Tool output saved (ID: ${toolResult.id})`);
+          
+          const tool = memoryDb.getToolOutput(toolResult.id);
+          results.push(`✅ Tool output retrieved: ${tool?.tool_name}`);
+          
+          const toolSearch = memoryDb.searchToolOutputs("bash");
+          results.push(`✅ Tool search: ${toolSearch.length} results`);
+          
+          const testAgentId = `test-${Date.now()}`;
+          memoryDb.saveSubagentResult({
+            id: testAgentId,
+            agentType: "general-purpose",
+            description: "Test task from /memory-test",
+            result: "Test result from subagent\nWith multiple lines\nAnd some details",
+            status: "completed",
+            toolUses: 5,
+            durationMs: 12345,
+          });
+          results.push(`✅ Subagent result saved (ID: ${testAgentId})`);
+          
+          const agentResult = memoryDb.getSubagentResult(testAgentId);
+          results.push(`✅ Subagent result retrieved: ${agentResult?.description}`);
+          
+          const factId = memoryDb.saveFact({
+            sessionId: `session-${Date.now()}`,
+            factType: "decision",
+            content: "Test decision: using TypeScript strict mode for all new files",
+          });
+          results.push(`✅ Session fact saved (ID: ${factId})`);
+          
+          const factSearch = memoryDb.searchFacts("TypeScript");
+          results.push(`✅ Fact search: ${factSearch.length} results`);
+          
+          memoryDb.saveCompressedResult("test-hash-123", "compressed text from test");
+          const cached = memoryDb.getCompressedResult("test-hash-123");
+          results.push(`✅ Compressed cache: ${cached === "compressed text from test" ? "OK" : "FAIL"}`);
+          
+          const { compactionId, keywordsCount } = memoryDb.compaction.saveSummaryWithKeywords({
+            summary: {
+              sessionId: `session-${Date.now()}`,
+              reason: "threshold",
+              tokensBefore: 10000,
+              summary: "Test compaction summary",
+              detailedSummary: "## Key Decisions\n1. Test decision",
+            },
+            keywords: [
+              { keyword: "test-decision", category: "decision" },
+              { keyword: "test-file.ts", category: "file" },
+              { keyword: "test-lesson", category: "lesson" },
+            ],
+          });
+          results.push(`✅ Compaction summary saved (ID: ${compactionId})`);
+          results.push(`✅ Compaction keywords saved (${keywordsCount} keywords)`);
+          
+          const keywordSearch = memoryDb.searchKeywords("test-decision", 5);
+          results.push(`✅ Keyword search: ${keywordSearch.length} results`);
+          
+          const failureId = memoryDb.saveFailure({
+            sessionId: `session-${Date.now()}`,
+            approach: "Tried to use fs.readFileSync",
+            error: "ENOENT: no such file or directory",
+            reason: "File doesn't exist yet",
+            solution: "Use fs.existsSync check first",
+          });
+          results.push(`✅ Failure saved (ID: ${failureId})`);
+          
+          const failureSearch = memoryDb.searchFailures("ENOENT", 5);
+          results.push(`✅ Failure search: ${failureSearch.length} results`);
+          
+          const stats = memoryDb.getStats();
+          results.push(`✅ Stats: ${stats.toolOutputs} tools, ${stats.subagentResults} agents, ${stats.sessionFacts} facts, ${stats.compactionSummaries} summaries, ${stats.compactionKeywords} keywords, ${stats.failures} failures, ${stats.dbSizeMb.toFixed(2)} MB`);
+          
+          raw.exec("ROLLBACK");
+          
+          cmdCtx.ui.notify(
+            `🧪 Memory DB Test Results:\n\n${results.join("\n")}\n\n` +
+            `💡 All test data was rolled back — no changes saved to DB.\n` +
+            `💡 Use /memory-stats to see full statistics.`,
+            "info"
+          );
+        } catch (innerErr) {
+          raw.exec("ROLLBACK");
+          throw innerErr;
+        }
+      } catch (err) {
+        results.push(`❌ Error: ${err instanceof Error ? err.message : String(err)}`);
+        cmdCtx.ui.notify(`❌ Test failed:\n\n${results.join("\n")}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-purge
+  // ==========================================================================
+  pi.registerCommand("memory-purge", {
+    description: "Purge old data from memory database",
+    handler: async (argStr, cmdCtx) => {
+      const args = argStr.trim();
+      let toolsDays = 7;
+      let factsDays = 30;
+      
+      if (args) {
+        const toolsMatch = args.match(/tools=(\d+)/);
+        const factsMatch = args.match(/facts=(\d+)/);
+        if (toolsMatch) toolsDays = parseInt(toolsMatch[1], 10);
+        if (factsMatch) factsDays = parseInt(factsMatch[1], 10);
+      }
+
+      try {
+        const statsBefore = memoryDb.getStats();
+        const deletedTools = memoryDb.purgeOldToolOutputs(toolsDays);
+        const deletedFacts = memoryDb.purgeOldFacts(factsDays);
+        const deletedSummaries = memoryDb.purgeOldCompactionSummaries(factsDays);
+        const deletedCompressed = memoryDb.purgeOldCompressedResults(factsDays);
+        const deletedKeywords = memoryDb.purgeOldKeywords(factsDays);
+        const deletedFailures = memoryDb.purgeOldFailures(factsDays);
+        const statsAfter = memoryDb.getStats();
+        
+        const lines = [
+          `🧹 Memory Database Cleanup`,
+          ``,
+          `Tool outputs (> ${toolsDays} days): deleted ${deletedTools}`,
+          `Session facts (> ${factsDays} days): deleted ${deletedFacts}`,
+          `Compaction summaries (> ${factsDays} days): deleted ${deletedSummaries}`,
+          `Compressed results (> ${factsDays} days): deleted ${deletedCompressed}`,
+          `Compaction keywords (> ${factsDays} days): deleted ${deletedKeywords}`,
+          `Failures (> ${factsDays} days): deleted ${deletedFailures}`,
+          ``,
+          `Before: ${statsBefore.toolOutputs} tools, ${statsBefore.sessionFacts} facts, ${statsBefore.compactionSummaries} summaries, ${statsBefore.compressedResults} compressed, ${statsBefore.compactionKeywords} keywords, ${statsBefore.failures} failures, ${statsBefore.dbSizeMb.toFixed(2)} MB`,
+          `After: ${statsAfter.toolOutputs} tools, ${statsAfter.sessionFacts} facts, ${statsAfter.compactionSummaries} summaries, ${statsAfter.compressedResults} compressed, ${statsAfter.compactionKeywords} keywords, ${statsAfter.failures} failures, ${statsAfter.dbSizeMb.toFixed(2)} MB`,
+        ];
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-search <query>
+  // ==========================================================================
+  pi.registerCommand("memory-search", {
+    description: "Search memory database: /memory-search <query>",
+    handler: async (argStr, cmdCtx) => {
+      const query = argStr.trim();
+      if (!query) {
+        cmdCtx.ui.notify("Usage: /memory-search <query>", "warning");
+        return;
+      }
+
+      try {
+        const lines: string[] = [];
+        
+        const toolResults = memoryDb.searchToolOutputs(query, 5);
+        if (toolResults.length > 0) {
+          lines.push(`🔧 Tool outputs (${toolResults.length}):`);
+          for (const t of toolResults) {
+            const date = new Date(t.timestamp).toLocaleString();
+            lines.push(`  [ID:${t.id}] ${t.tool_name} (${date})`);
+            lines.push(`    ${t.summary.slice(0, 80)}`);
+          }
+          lines.push(``);
+        }
+        
+        const agentResults = memoryDb.searchSubagentResults(query, 5);
+        if (agentResults.length > 0) {
+          lines.push(`🤖 Subagent results (${agentResults.length}):`);
+          for (const a of agentResults) {
+            const date = new Date(a.timestamp).toLocaleString();
+            lines.push(`  [${a.id}] ${a.description} (${date})`);
+            lines.push(`    ${a.result.slice(0, 80).replace(/\n/g, ' ')}`);
+          }
+          lines.push(``);
+        }
+        
+        const factResults = memoryDb.searchFacts(query, 5);
+        if (factResults.length > 0) {
+          lines.push(`📝 Session facts (${factResults.length}):`);
+          for (const f of factResults) {
+            const date = new Date(f.timestamp).toLocaleString();
+            lines.push(`  [${f.fact_type}] ${f.content.slice(0, 80)} (${date})`);
+          }
+          lines.push(``);
+        }
+
+        const summaryResults = memoryDb.searchCompactionSummaries(query, 5);
+        if (summaryResults.length > 0) {
+          lines.push(`📦 Compaction summaries (${summaryResults.length}):`);
+          for (const s of summaryResults) {
+            const date = new Date(s.timestamp).toLocaleString();
+            const preview = s.summary.slice(0, 120).replace(/\n/g, ' ');
+            lines.push(`  [${s.reason}] (${date})`);
+            lines.push(`    ${preview}${s.summary.length > 120 ? '...' : ''}`);
+          }
+          lines.push(``);
+        }
+
+        const compressedResults = memoryDb.searchCompressedResults(query, 5);
+        if (compressedResults.length > 0) {
+          lines.push(`🗜️ Compressed results (${compressedResults.length}):`);
+          for (const c of compressedResults) {
+            const date = new Date(c.timestamp).toLocaleString();
+            lines.push(`  [ID:${c.id}] ${c.original_hash.slice(0, 16)} (${date})`);
+            lines.push(`    ${c.compressed.slice(0, 80)}`);
+          }
+          lines.push(``);
+        }
+
+        const keywordResults = memoryDb.searchKeywords(query, 5);
+        if (keywordResults.length > 0) {
+          lines.push(`🔑 Compaction keywords (${keywordResults.length}):`);
+          for (const k of keywordResults) {
+            const date = new Date(k.compaction_timestamp).toLocaleString();
+            const icon = getKeywordCategoryIcon(k.category);
+            lines.push(`  ${icon} [${k.category}] ${k.keyword}`);
+            lines.push(`    Compaction ID: ${k.compaction_id} (${k.compaction_reason}, ${k.compaction_tokens_before} tokens)`);
+            lines.push(`    Date: ${date}`);
+          }
+          lines.push(``);
+        }
+
+        const failureResults = memoryDb.searchFailures(query, 5);
+        if (failureResults.length > 0) {
+          lines.push(`⚠️ Failures (${failureResults.length}):`);
+          for (const f of failureResults) {
+            const date = new Date(f.timestamp).toLocaleString();
+            lines.push(`  [ID:${f.id}] ${f.approach.slice(0, 50)} (${date})`);
+            lines.push(`    Error: ${f.error.slice(0, 80)}`);
+          }
+          lines.push(``);
+        }
+        
+        if (lines.length === 0) {
+          lines.push(`No results found for: "${query}"`);
+        } else {
+          lines.unshift(`🔍 Search results for: "${query}"`);
+        }
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-add <type> <content>
+  // ==========================================================================
+  pi.registerCommand("memory-add", {
+    description: "Add fact to memory: /memory-add <type> <content>\nTypes: decision, lesson, preference, architecture, api",
+    handler: async (argStr, cmdCtx) => {
+      const argStrTrimmed = argStr.trim();
+      if (!argStrTrimmed) {
+        cmdCtx.ui.notify(
+          "Usage: /memory-add <type> <content>\n" +
+          "Types: decision, lesson, preference, architecture, api\n" +
+          "Example: /memory-add decision Используем PostgreSQL",
+          "warning"
+        );
+        return;
+      }
+
+      const spaceIndex = argStrTrimmed.indexOf(" ");
+      if (spaceIndex === -1) {
+        cmdCtx.ui.notify("Usage: /memory-add <type> <content>", "warning");
+        return;
+      }
+
+      const factType = argStrTrimmed.slice(0, spaceIndex).toLowerCase();
+      const content = argStrTrimmed.slice(spaceIndex + 1).trim();
+
+      if (!content) {
+        cmdCtx.ui.notify("Content cannot be empty", "warning");
+        return;
+      }
+
+      try {
+        const sessionMemory = getSessionMemory(memoryDb);
+        const id = sessionMemory.addManualFact(factType, content);
+        cmdCtx.ui.notify(
+          `✅ Fact saved (ID: ${id})\n` +
+          `Type: ${factType}\n` +
+          `Content: ${content.slice(0, 100)}${content.length > 100 ? '...' : ''}`,
+          "info"
+        );
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-summaries [limit]
+  // ==========================================================================
+  pi.registerCommand("memory-summaries", {
+    description: "Show compaction summaries: /memory-summaries [limit]",
+    handler: async (argStr, cmdCtx) => {
+      const limit = argStr.trim() ? parseInt(argStr.trim(), 10) : 5;
+      const stats = memoryDb.getStats();
+
+      if (stats.compactionSummaries === 0) {
+        cmdCtx.ui.notify(
+          `📦 No compaction summaries saved yet.\n` +
+          `Compaction summaries are saved automatically when context is compacted.`,
+          "info"
+        );
+        return;
+      }
+
+      try {
+        const sessionMemory = getSessionMemory(memoryDb);
+        const summaries = memoryDb.getCompactionSummaries(sessionMemory?.getSessionId() || "", limit);
+        
+        const lines = [
+          `📦 Compaction Summaries (${stats.compactionSummaries} total, showing ${summaries.length}):`,
+          ``,
+        ];
+
+        for (const s of summaries) {
+          const date = new Date(s.timestamp).toLocaleString();
+          const icon = getCompactionReasonIcon(s.reason);
+
+          const preview = s.summary.slice(0, 150).replace(/\n/g, ' ');
+          lines.push(`${icon} [${s.reason}] ${s.tokens_before} tokens (${date})`);
+          lines.push(`  ${preview}${s.summary.length > 150 ? '...' : ''}`);
+          
+          if (s.detailed_summary) {
+            const detailedPreview = s.detailed_summary.slice(0, 100).replace(/\n/g, ' ');
+            lines.push(`  📋 Detailed: ${detailedPreview}${s.detailed_summary.length > 100 ? '...' : ''}`);
+          }
+          
+          lines.push(`  💡 Use ctx_search "id:${s.id}" to see full content`);
+          lines.push(``);
+        }
+
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-keywords [query]
+  // ==========================================================================
+  pi.registerCommand("memory-keywords", {
+    description: "Show compaction keywords: /memory-keywords [query]",
+    handler: async (argStr, cmdCtx) => {
+      const query = argStr.trim();
+      const stats = memoryDb.getKeywordsStats();
+
+      if (stats.total === 0) {
+        cmdCtx.ui.notify(
+          `🔑 No compaction keywords saved yet.\n` +
+          `Keywords are extracted automatically during compaction.`,
+          "info"
+        );
+        return;
+      }
+
+      try {
+        const lines = [
+          `🔑 Compaction Keywords Statistics`,
+          ``,
+          `Total keywords: ${stats.total}`,
+          `Unique keywords: ${stats.uniqueKeywords}`,
+          ``,
+          `By category:`,
+          `  📄 Files: ${stats.byCategory.file}`,
+          `  🎯 Decisions: ${stats.byCategory.decision}`,
+          `  💡 Lessons: ${stats.byCategory.lesson}`,
+          ``,
+        ];
+
+        if (query) {
+          const results = memoryDb.searchKeywords(query, 20);
+          
+          if (results.length === 0) {
+            lines.push(`No keywords found for: "${query}"`);
+          } else {
+            lines.push(`🔍 Search results for: "${query}" (${results.length} found)`);
+            lines.push(``);
+            
+            for (const r of results) {
+              const icon = getKeywordCategoryIcon(r.category);
+              const date = new Date(r.compaction_timestamp).toLocaleString();
+              
+              lines.push(`${icon} [${r.category}] ${r.keyword}`);
+              lines.push(`  Compaction ID: ${r.compaction_id} (${r.compaction_reason}, ${r.compaction_tokens_before} tokens)`);
+              lines.push(`  Date: ${date}`);
+              lines.push(`  💡 Use ctx_search "id:${r.compaction_id}" to see full summary`);
+              lines.push(``);
+            }
+          }
+        } else {
+          const recent = memoryDb.getRecentKeywords(20);
+          
+          lines.push(`📋 Recent keywords (last 20):`);
+          lines.push(``);
+          
+          for (const kw of recent) {
+            const icon = getKeywordCategoryIcon(kw.category);
+            const date = new Date(kw.timestamp).toLocaleString();
+            
+            lines.push(`${icon} [${kw.category}] ${kw.keyword}`);
+            lines.push(`  Compaction ID: ${kw.compaction_id} | Date: ${date}`);
+            lines.push(``);
+          }
+          
+          lines.push(`💡 Use /memory-keywords <query> to search`);
+          lines.push(`💡 Use ctx_search "id:<compaction_id>" to see full summary`);
+        }
+
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-failures [query]
+  // ==========================================================================
+  pi.registerCommand("memory-failures", {
+    description: "Show failure records: /memory-failures [query]",
+    handler: async (argStr, cmdCtx) => {
+      const args = argStr.trim();
+      let limit = 10;
+      let query = "";
+      
+      if (args) {
+        const limitMatch = args.match(/limit=(\d+)/);
+        if (limitMatch) {
+          limit = parseInt(limitMatch[1]);
+        } else {
+          query = args;
+        }
+      }
+
+      try {
+        const failures = query 
+          ? memoryDb.searchFailures(query, limit)
+          : memoryDb.getRecentFailures(limit);
+        
+        if (failures.length === 0) {
+          cmdCtx.ui.notify("No failure records found", "info");
+          return;
+        }
+        
+        const lines = [
+          `⚠️ Failure Records (${failures.length} found)`,
+          ``,
+        ];
+        
+        for (const f of failures) {
+          const date = new Date(f.timestamp).toLocaleString();
+          lines.push(`━━━ Failure #${f.id} ━━━`);
+          lines.push(`Date: ${date}`);
+          lines.push(`Approach: ${f.approach}`);
+          lines.push(`Error: ${f.error}`);
+          if (f.reason) lines.push(`Reason: ${f.reason}`);
+          if (f.solution) lines.push(`Solution: ${f.solution}`);
+          if (f.context) lines.push(`Context: ${f.context}`);
+          lines.push(``);
+        }
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-subagents [limit]
+  // ==========================================================================
+  pi.registerCommand("memory-subagents", {
+    description: "Show all subagent results: /memory-subagents [limit]",
+    handler: async (argStr, cmdCtx) => {
+      const args = argStr.trim();
+      let limit = 20;
+      let query = "";
+      
+      if (args) {
+        const limitMatch = args.match(/limit=(\d+)/);
+        if (limitMatch) {
+          limit = parseInt(limitMatch[1]);
+        } else {
+          query = args;
+        }
+      }
+
+      try {
+        const raw = memoryDb.getRaw();
+        
+        let results: any[];
+        if (query) {
+          results = raw.prepare(`
+            SELECT s.* FROM subagent_results s
+            JOIN subagent_results_fts f ON s.rowid = f.rowid
+            WHERE subagent_results_fts MATCH ?
+            ORDER BY s.timestamp DESC
+            LIMIT ?
+          `).all(`"${query}"`, limit);
+        } else {
+          results = raw.prepare(`
+            SELECT id, agent_type, description, status, tool_uses, 
+                   duration_ms, timestamp
+            FROM subagent_results
+            ORDER BY timestamp DESC
+            LIMIT ?
+          `).all(limit);
+        }
+        
+        if (results.length === 0) {
+          cmdCtx.ui.notify(
+            `🤖 No subagent results found${query ? ` for: "${query}"` : ''}.\n` +
+            `Subagent results are saved automatically when /agent-bg completes.`,
+            "info"
+          );
+          return;
+        }
+        
+        const lines = [
+          `🤖 Subagent Results (${results.length} shown${query ? ` for: "${query}"` : ''})`,
+          ``,
+        ];
+
+        for (const r of results) {
+          const date = new Date(r.timestamp).toLocaleString();
+          const statusEmoji = formatStatusEmoji(r.status);
+          const duration = formatDuration(r.duration_ms);
+          const shortId = r.id.slice(0, 16);
+          
+          lines.push(`${statusEmoji} [${r.agent_type}] ${r.description}`);
+          lines.push(`   ID: ${shortId} | ${date} | ${r.tool_uses} tools | ${duration} | Status: ${r.status}`);
+          lines.push(`   💡 Use ctx_search "id:${shortId}" to see full result`);
+          lines.push(``);
+        }
+        
+        lines.push(`💡 Use /memory-subagents <query> to search by keyword`);
+        lines.push(`💡 Use /memory-subagents limit=50 to see more results`);
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+
+  // ==========================================================================
+  // /memory-consolidate
+  // ==========================================================================
+  pi.registerCommand("memory-consolidate", {
+    description: "Consolidate similar memory entries: /memory-consolidate [--dry-run] [threshold=0.7]",
+    handler: async (argStr, cmdCtx) => {
+      const args = argStr.trim();
+      let threshold = 0.7;
+      let dryRun = false;
+      
+      if (args.includes("--dry-run")) {
+        dryRun = true;
+      }
+      
+      const thresholdMatch = args.match(/threshold=(\d+\.?\d*)/);
+      if (thresholdMatch) {
+        threshold = parseFloat(thresholdMatch[1]);
+      }
+
+      try {
+        const projectRoot = MemoryDatabase.getCurrentProjectRoot?.() ?? undefined;
+        const result = consolidateMemory(memoryDb, { threshold, dryRun, projectPath: projectRoot });
+        
+        const lines = [
+          `🔄 Memory Consolidation ${dryRun ? '(DRY RUN)' : ''}`,
+          ``,
+          `Groups found: ${result.groupsFound}`,
+          `Records merged: ${result.recordsMerged}`,
+          `Records deleted: ${result.recordsDeleted}`,
+          ``,
+          dryRun ? 'Run without --dry-run to apply changes' : 'Consolidation applied',
+        ];
+        
+        cmdCtx.ui.notify(lines.join("\n"), "info");
+      } catch (err) {
+        cmdCtx.ui.notify(`❌ Error: ${err instanceof Error ? err.message : String(err)}`, "error");
+      }
+    },
+  });
+}

@@ -1,0 +1,23 @@
+{
+  "name": "igorpi-memory",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "@sinclair/typebox": "*",
+    "better-sqlite3": "*",
+    "nanoid": "*"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "*",
+    "typescript": "*"
+  }
+}

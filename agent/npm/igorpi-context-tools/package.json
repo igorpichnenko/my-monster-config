@@ -1,0 +1,25 @@
+{
+  "name": "igorpi-context-tools",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./index.ts",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+     "@earendil-works/pi-agent-core": "*",
+     "@types/better-sqlite3": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "igorpi-memory": "*"
+  }
+}

@@ -5,7 +5,7 @@ agent/sessions/
 
 # === npm зависимости ===
 agent/npm/*/node_modules/
-agent/npm/loop-police/node_modules/
+agent/npm/igorpi-loop-police/node_modules/
 node_modules/
 
 # === Конфигурация пользователя (локальная) ===

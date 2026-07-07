@@ -4,10 +4,10 @@
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.3",
     "@earendil-works/pi-coding-agent": "^0.80.3",
-    "loop-police": "file:loop-police",
-    "pi-context-tools": "file:pi-context-tools",
-    "pi-memory": "file:pi-memory",
-    "pi-minimal-web": "file:pi-minimal-web",
-    "pi-sub": "file:pi-sub"
+    "igorpi-context-tools": "file:igorpi-context-tools",
+    "igorpi-loop-police": "file:igorpi-loop-police",
+    "igorpi-memory": "file:igorpi-memory",
+    "igorpi-minimal-web": "file:igorpi-minimal-web",
+    "igorpi-subagents": "file:igorpi-subagents"
   }
 }
