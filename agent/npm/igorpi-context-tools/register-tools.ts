@@ -17,6 +17,9 @@
  *      - Обновлены импорты на igorpi-memory и локальные tools/
  */
 
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { defineTool } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
@@ -28,6 +31,40 @@ import { executeCtxSearch, type CtxSearchArgs } from "./tools/ctx-search.js";
 
 /** Подсказка для разворачивания результата */
 const EXPAND_HINT = " (Ctrl+O to expand)";
+
+/**
+ * Конфиг контекстных инструментов.
+ * Путь: ~/.pi/agent/context-tools.json
+ */
+interface ContextToolsConfig {
+  /** Сколько символов показывать в превью renderCall (по умолчанию 120) */
+  previewLength?: number;
+}
+
+/** Кэш конфига — читается один раз при загрузке расширения */
+let _cachedConfig: ContextToolsConfig | null = null;
+
+function loadConfig(): ContextToolsConfig {
+  if (_cachedConfig) return _cachedConfig;
+  
+  const configPath = join(process.env.HOME || "/", ".pi", "agent", "context-tools.json");
+  try {
+    const raw = readFileSync(configPath, "utf-8");
+    const parsed = JSON.parse(raw) as ContextToolsConfig;
+    _cachedConfig = parsed;
+    return parsed;
+  } catch {
+    // Файл не существует или невалидный JSON — используем дефолт
+    _cachedConfig = {};
+    return {};
+  }
+}
+
+/** Дефолтное количество символов превью (если конфиг не задан или malformed) */
+const DEFAULT_PREVIEW_LENGTH = 120;
+
+/** Текущее значение previewLength — читается из конфига при загрузке */
+const PREVIEW_LENGTH = Math.max(30, Math.min(256, loadConfig().previewLength ?? DEFAULT_PREVIEW_LENGTH));
 
 /**
  * v13: Экранирует аргумент для безопасной передачи в shell.
@@ -153,7 +190,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     }),
     
     renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("bash")) + " " + theme.fg("dim", args.command.slice(0, 50)), 0, 0);
+      return new Text("▸ " + theme.fg("toolTitle", theme.bold("bash")) + " " + theme.fg("dim", args.command.slice(0, PREVIEW_LENGTH)), 0, 0);
     },
     
     renderResult(result, opts, theme) {
@@ -186,7 +223,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     }),
     
     renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("read")) + " " + theme.fg("dim", args.path.slice(0, 50)), 0, 0);
+      return new Text("▸ " + theme.fg("toolTitle", theme.bold("read")) + " " + theme.fg("dim", args.path.slice(0, PREVIEW_LENGTH)), 0, 0);
     },
     
     renderResult(result, opts, theme) {
@@ -219,7 +256,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     }),
     
     renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("grep")) + " " + theme.fg("dim", args.pattern.slice(0, 30)), 0, 0);
+      return new Text("▸ " + theme.fg("toolTitle", theme.bold("grep")) + " " + theme.fg("dim", args.pattern.slice(0, PREVIEW_LENGTH)), 0, 0);
     },
     
     renderResult(result, opts, theme) {
@@ -263,7 +300,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     }),
     
     renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("find")) + " " + theme.fg("dim", args.pattern.slice(0, 30)), 0, 0);
+      return new Text("▸ " + theme.fg("toolTitle", theme.bold("find")) + " " + theme.fg("dim", args.pattern.slice(0, PREVIEW_LENGTH)), 0, 0);
     },
     
     renderResult(result, opts, theme) {
@@ -346,7 +383,7 @@ export function registerTools(pi: ExtensionAPI, memoryDb: MemoryDatabase): void 
     }),
     
     renderCall(args, theme) {
-      return new Text("▸ " + theme.fg("toolTitle", theme.bold("ctx_search")) + " " + theme.fg("dim", args.query.slice(0, 50)), 0, 0);
+      return new Text("▸ " + theme.fg("toolTitle", theme.bold("ctx_search")) + " " + theme.fg("dim", args.query.slice(0, PREVIEW_LENGTH)), 0, 0);
     },
     
     renderResult(result, { expanded, isPartial }: any, theme) {
