@@ -6,6 +6,10 @@
  * 
  * v11: Singleton адаптируется к смене проекта, автоматически пересоздаётся
  *      Добавлен getKeywordById для поиска по ID keyword
+ * 
+ * v14: Добавлены code analysis репозитории (diagnostics, dependencies, unused, duplicates)
+ * v14.1: Добавлены методы deleteByProject для code analysis таблиц
+ * v17.2: Добавлены методы deleteByFile для code analysis таблиц
  */
 
 import Database from "better-sqlite3";
@@ -19,6 +23,10 @@ import {
   CompactionRepository,
   FailuresRepository,
   CompressedResultsRepository,
+  DiagnosticsRepository,
+  DependenciesRepository,
+  UnusedRepository,
+  DuplicatesRepository,
 } from "./repositories/index.js";
 
 /** Путь к БД относительно корня проекта. */
@@ -54,6 +62,12 @@ export class MemoryDatabase {
   public readonly compaction: CompactionRepository;
   public readonly failures: FailuresRepository;
   public readonly compressedResults: CompressedResultsRepository;
+  
+  // v14: Code analysis репозитории
+  public readonly diagnostics: DiagnosticsRepository;
+  public readonly dependencies: DependenciesRepository;
+  public readonly unused: UnusedRepository;
+  public readonly duplicates: DuplicatesRepository;
 
   private constructor(dbFilePath: string) {
     const dir = dirname(dbFilePath);
@@ -76,6 +90,12 @@ export class MemoryDatabase {
     this.compaction = new CompactionRepository(this.db);
     this.failures = new FailuresRepository(this.db);
     this.compressedResults = new CompressedResultsRepository(this.db);
+    
+    // v14: Code analysis репозитории
+    this.diagnostics = new DiagnosticsRepository(this.db);
+    this.dependencies = new DependenciesRepository(this.db);
+    this.unused = new UnusedRepository(this.db);
+    this.duplicates = new DuplicatesRepository(this.db);
   }
 
   /**
@@ -229,9 +249,9 @@ export class MemoryDatabase {
     return this.sessionFacts.getRecent(limit, projectPath);
   }
 
-getFactsByProject(projectPath: string, limit: number = 10000) {
-  return this.sessionFacts.getByProject(projectPath, limit);
-}
+  getFactsByProject(projectPath: string, limit: number = 10000) {
+    return this.sessionFacts.getByProject(projectPath, limit);
+  }
 
   purgeOldFacts(daysOld: number = 30) {
     return this.sessionFacts.purgeOld(daysOld);
@@ -349,6 +369,159 @@ getFactsByProject(projectPath: string, limit: number = 10000) {
   }
 
   // =========================================================================
+  // v14: Code Analysis — делегирование репозиториям
+  // =========================================================================
+
+  // Diagnostics
+  saveDiagnostic(data: Parameters<DiagnosticsRepository["save"]>[0]) {
+    return this.diagnostics.save(data);
+  }
+
+  getDiagnosticById(id: number) {
+    return this.diagnostics.getById(id);
+  }
+
+  getDiagnosticsByProject(projectPath: string, limit: number = 100) {
+    return this.diagnostics.getByProject(projectPath, limit);
+  }
+
+  getDiagnosticsByFile(projectPath: string, filePath: string) {
+    return this.diagnostics.getByFile(projectPath, filePath);
+  }
+
+  getDiagnosticsBySeverity(
+    projectPath: string, 
+    severity: 'error' | 'warning' | 'info' | 'hint', 
+    limit: number = 50
+  ) {
+    return this.diagnostics.getBySeverity(projectPath, severity, limit);
+  }
+
+  searchDiagnostics(query: string, projectPath: string, limit: number = 10) {
+    return this.diagnostics.search(query, projectPath, limit);
+  }
+
+  deleteDiagnosticsByFile(projectPath: string, filePath: string) {
+    return this.diagnostics.deleteByFile(projectPath, filePath);
+  }
+
+  /** v14.1: Удаляет все диагностики для проекта */
+  deleteDiagnosticsByProject(projectPath: string): number {
+    return this.diagnostics.deleteByProject(projectPath);
+  }
+
+  purgeOldDiagnostics(daysOld: number = 30) {
+    return this.diagnostics.purgeOld(daysOld);
+  }
+
+  getDiagnosticsStats(projectPath: string) {
+    return this.diagnostics.getStats(projectPath);
+  }
+
+  // Dependencies
+  saveDependency(data: Parameters<DependenciesRepository["save"]>[0]) {
+    return this.dependencies.save(data);
+  }
+
+  getDependenciesByProject(projectPath: string, limit: number = 1000) {
+    return this.dependencies.getByProject(projectPath, limit);
+  }
+
+  getDependenciesForFile(projectPath: string, filePath: string) {
+    return this.dependencies.getDependenciesForFile(projectPath, filePath);
+  }
+
+  getDependentsOf(projectPath: string, filePath: string) {
+    return this.dependencies.getDependentsOf(projectPath, filePath);
+  }
+
+  getCircularDependencies(projectPath: string) {
+    return this.dependencies.getCircularDependencies(projectPath);
+  }
+
+  searchDependencies(query: string, projectPath: string, limit: number = 10) {
+    return this.dependencies.search(query, projectPath, limit);
+  }
+
+  /** v14.1: Удаляет все зависимости для проекта */
+  deleteDependenciesByProject(projectPath: string): number {
+    return this.dependencies.deleteByProject(projectPath);
+  }
+
+  /** v17.2: Удаляет зависимости для конкретного файла */
+  deleteDependenciesByFile(projectPath: string, filePath: string): number {
+    return this.dependencies.deleteByFile(projectPath, filePath);
+  }
+
+  purgeOldDependencies(daysOld: number = 30) {
+    return this.dependencies.purgeOld(daysOld);
+  }
+
+  // Unused Code
+  saveUnusedCode(data: Parameters<UnusedRepository["save"]>[0]) {
+    return this.unused.save(data);
+  }
+
+  getUnusedByProject(projectPath: string, limit: number = 100) {
+    return this.unused.getByProject(projectPath, limit);
+  }
+
+  getUnusedByFile(projectPath: string, filePath: string) {
+    return this.unused.getByFile(projectPath, filePath);
+  }
+
+  getUnusedByType(projectPath: string, symbolType: string, limit: number = 50) {
+    return this.unused.getByType(projectPath, symbolType, limit);
+  }
+
+  searchUnused(query: string, projectPath: string, limit: number = 10) {
+    return this.unused.search(query, projectPath, limit);
+  }
+
+  /** v14.1: Удаляет все записи unused для проекта */
+  deleteUnusedByProject(projectPath: string): number {
+    return this.unused.deleteByProject(projectPath);
+  }
+
+  purgeOldUnused(daysOld: number = 30) {
+    return this.unused.purgeOld(daysOld);
+  }
+
+  // Duplicates
+  saveDuplicate(data: Parameters<DuplicatesRepository["save"]>[0]) {
+    return this.duplicates.save(data);
+  }
+
+  getDuplicatesByProject(projectPath: string, limit: number = 100) {
+    return this.duplicates.getByProject(projectPath, limit);
+  }
+
+  getDuplicatesByFile(projectPath: string, filePath: string) {
+    return this.duplicates.getByFile(projectPath, filePath);
+  }
+
+  getHighSimilarityDuplicates(
+    projectPath: string, 
+    minSimilarity: number = 0.8, 
+    limit: number = 50
+  ) {
+    return this.duplicates.getHighSimilarity(projectPath, minSimilarity, limit);
+  }
+
+  searchDuplicates(query: string, projectPath: string, limit: number = 10) {
+    return this.duplicates.search(query, projectPath, limit);
+  }
+
+  /** v14.1: Удаляет все дубликаты для проекта */
+  deleteDuplicatesByProject(projectPath: string): number {
+    return this.duplicates.deleteByProject(projectPath);
+  }
+
+  purgeOldDuplicates(daysOld: number = 30) {
+    return this.duplicates.purgeOld(daysOld);
+  }
+
+  // =========================================================================
   // Вспомогательная функция — безопасный COUNT
   // =========================================================================
 
@@ -374,6 +547,10 @@ getFactsByProject(projectPath: string, limit: number = 10000) {
     compactionSummaries: number;
     compactionKeywords: number;
     failures: number;
+    codeDiagnostics: number;
+    codeDependencies: number;
+    unusedCode: number;
+    codeDuplicates: number;
     dbSizeMb: number;
   } {
     const toolOutputs = this.countTable("tool_outputs");
@@ -383,6 +560,12 @@ getFactsByProject(projectPath: string, limit: number = 10000) {
     const compactionSummaries = this.countTable("compaction_summaries");
     const compactionKeywords = this.countTable("compaction_keywords");
     const failures = this.countTable("failures");
+    
+    // v14: Code analysis tables
+    const codeDiagnostics = this.countTable("code_diagnostics");
+    const codeDependencies = this.countTable("code_dependencies");
+    const unusedCode = this.countTable("unused_code");
+    const codeDuplicates = this.countTable("code_duplicates");
 
     const pageInfo = this.db.prepare("PRAGMA page_count").get() as { page_count: number };
     const pageSize = this.db.prepare("PRAGMA page_size").get() as { page_size: number };
@@ -396,6 +579,10 @@ getFactsByProject(projectPath: string, limit: number = 10000) {
       compactionSummaries,
       compactionKeywords,
       failures,
+      codeDiagnostics,
+      codeDependencies,
+      unusedCode,
+      codeDuplicates,
       dbSizeMb 
     };
   }
@@ -408,3 +595,9 @@ export type { SessionFact } from "./repositories/index.js";
 export type { CompactionSummary, CompactionKeyword } from "./repositories/index.js";
 export type { FailureRecord } from "./repositories/index.js";
 export type { CompressedResult } from "./repositories/index.js";
+
+// v14: Code analysis types
+export type { CodeDiagnostic } from "./repositories/index.js";
+export type { CodeDependency } from "./repositories/index.js";
+export type { UnusedCode } from "./repositories/index.js";
+export type { CodeDuplicate } from "./repositories/index.js";

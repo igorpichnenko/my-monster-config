@@ -70,6 +70,7 @@ export interface AgentRecord {
   compactionCount: number;
   invocation?: AgentInvocation;
   noInject?: boolean;  // ← НОВОЕ: если true, не инжектировать результат в родителя
+  cwd?: string;        // ← v16: НОВОЕ: рабочий каталог агента для эмитта событий
 }
 
 export interface AgentInvocation {

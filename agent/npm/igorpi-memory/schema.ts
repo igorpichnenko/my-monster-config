@@ -3,6 +3,9 @@
  * 
  * Создаёт все таблицы при инициализации.
  * Без миграций и проверки версии — БД создаётся с нуля.
+ * 
+ * v14: Добавлены таблицы для code analysis (diagnostics, dependencies, unused, duplicates)
+ * v14.1: Добавлены severity и source в FTS5 индекс для code_diagnostics
  */
 
 import type Database from "better-sqlite3";
@@ -13,7 +16,9 @@ import type Database from "better-sqlite3";
  */
 export function initSchema(db: Database.Database): void {
   db.exec(`
+    -- =========================================================================
     -- Tool Outputs (с deduplication и priority)
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS tool_outputs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       tool_name TEXT NOT NULL,
@@ -62,7 +67,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.id, new.tool_name, new.args, new.output, new.summary);
     END;
 
+    -- =========================================================================
     -- Subagent Results
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS subagent_results (
       id TEXT PRIMARY KEY,
       agent_type TEXT NOT NULL,
@@ -103,7 +110,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.rowid, new.agent_type, new.description, new.result);
     END;
 
+    -- =========================================================================
     -- Session Facts (с project_path для изоляции между проектами)
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS session_facts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -144,7 +153,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.id, new.fact_type, new.content);
     END;
 
+    -- =========================================================================
     -- Compressed Results Cache
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS compressed_results (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       original_hash TEXT NOT NULL UNIQUE,
@@ -179,7 +190,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.id, new.original_hash, new.compressed);
     END;
 
+    -- =========================================================================
     -- Compaction Summaries
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS compaction_summaries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -219,7 +232,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.id, new.reason, new.summary, new.detailed_summary);
     END;
 
+    -- =========================================================================
     -- Compaction Keywords
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS compaction_keywords (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       compaction_id INTEGER NOT NULL,
@@ -260,7 +275,9 @@ export function initSchema(db: Database.Database): void {
       VALUES (new.id, new.keyword);
     END;
 
+    -- =========================================================================
     -- Failures
+    -- =========================================================================
     CREATE TABLE IF NOT EXISTS failures (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       session_id TEXT NOT NULL,
@@ -299,6 +316,188 @@ export function initSchema(db: Database.Database): void {
       VALUES ('delete', old.id, old.approach, old.error, old.reason, old.solution, old.context);
       INSERT INTO failures_fts(rowid, approach, error, reason, solution, context)
       VALUES (new.id, new.approach, new.error, new.reason, new.solution, new.context);
+    END;
+
+    -- =========================================================================
+    -- Code Analysis Tables (для igorpi-code-analysis)
+    -- =========================================================================
+
+    -- Code Diagnostics (ошибки TypeScript/ESLint/Ruff/clangd)
+    CREATE TABLE IF NOT EXISTS code_diagnostics (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      line INTEGER NOT NULL,
+      column INTEGER NOT NULL,
+      end_line INTEGER,
+      end_column INTEGER,
+      severity TEXT NOT NULL CHECK(severity IN ('error', 'warning', 'info', 'hint')),
+      source TEXT NOT NULL,
+      rule_id TEXT,
+      code TEXT,
+      message TEXT NOT NULL,
+      suggestion TEXT,
+      fix_available INTEGER DEFAULT 0,
+      timestamp INTEGER NOT NULL,
+      session_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_diagnostics_project ON code_diagnostics(project_path);
+    CREATE INDEX IF NOT EXISTS idx_diagnostics_file ON code_diagnostics(file_path);
+    CREATE INDEX IF NOT EXISTS idx_diagnostics_severity ON code_diagnostics(severity);
+    CREATE INDEX IF NOT EXISTS idx_diagnostics_source ON code_diagnostics(source);
+
+    -- v14.1: Добавлены severity и source в FTS5 индекс
+    CREATE VIRTUAL TABLE IF NOT EXISTS code_diagnostics_fts USING fts5(
+      file_path, message, suggestion, code, rule_id, severity, source,
+      content='code_diagnostics',
+      content_rowid='id',
+      tokenize='unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS code_diagnostics_ai AFTER INSERT ON code_diagnostics BEGIN
+      INSERT INTO code_diagnostics_fts(rowid, file_path, message, suggestion, code, rule_id, severity, source)
+      VALUES (new.id, new.file_path, new.message, new.suggestion, new.code, new.rule_id, new.severity, new.source);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_diagnostics_ad AFTER DELETE ON code_diagnostics BEGIN
+      INSERT INTO code_diagnostics_fts(code_diagnostics_fts, rowid, file_path, message, suggestion, code, rule_id, severity, source)
+      VALUES ('delete', old.id, old.file_path, old.message, old.suggestion, old.code, old.rule_id, old.severity, old.source);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_diagnostics_au AFTER UPDATE ON code_diagnostics BEGIN
+      INSERT INTO code_diagnostics_fts(code_diagnostics_fts, rowid, file_path, message, suggestion, code, rule_id, severity, source)
+      VALUES ('delete', old.id, old.file_path, old.message, old.suggestion, old.code, old.rule_id, old.severity, old.source);
+      INSERT INTO code_diagnostics_fts(rowid, file_path, message, suggestion, code, rule_id, severity, source)
+      VALUES (new.id, new.file_path, new.message, new.suggestion, new.code, new.rule_id, new.severity, new.source);
+    END;
+
+    -- Code Dependencies (зависимости между файлами)
+    CREATE TABLE IF NOT EXISTS code_dependencies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      depends_on TEXT NOT NULL,
+      dependency_type TEXT NOT NULL CHECK(dependency_type IN ('import', 'require', 'dynamic')),
+      is_circular INTEGER DEFAULT 0,
+      timestamp INTEGER NOT NULL,
+      session_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deps_project ON code_dependencies(project_path);
+    CREATE INDEX IF NOT EXISTS idx_deps_file ON code_dependencies(file_path);
+    CREATE INDEX IF NOT EXISTS idx_deps_depends ON code_dependencies(depends_on);
+    CREATE INDEX IF NOT EXISTS idx_deps_circular ON code_dependencies(is_circular);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS code_dependencies_fts USING fts5(
+      file_path, depends_on,
+      content='code_dependencies',
+      content_rowid='id',
+      tokenize='unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS code_dependencies_ai AFTER INSERT ON code_dependencies BEGIN
+      INSERT INTO code_dependencies_fts(rowid, file_path, depends_on)
+      VALUES (new.id, new.file_path, new.depends_on);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_dependencies_ad AFTER DELETE ON code_dependencies BEGIN
+      INSERT INTO code_dependencies_fts(code_dependencies_fts, rowid, file_path, depends_on)
+      VALUES ('delete', old.id, old.file_path, old.depends_on);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_dependencies_au AFTER UPDATE ON code_dependencies BEGIN
+      INSERT INTO code_dependencies_fts(code_dependencies_fts, rowid, file_path, depends_on)
+      VALUES ('delete', old.id, old.file_path, old.depends_on);
+      INSERT INTO code_dependencies_fts(rowid, file_path, depends_on)
+      VALUES (new.id, new.file_path, new.depends_on);
+    END;
+
+    -- Unused Code (неиспользуемый код)
+    CREATE TABLE IF NOT EXISTS unused_code (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      file_path TEXT NOT NULL,
+      symbol_name TEXT NOT NULL,
+      symbol_type TEXT NOT NULL CHECK(symbol_type IN ('function', 'class', 'variable', 'interface', 'type', 'export')),
+      line INTEGER NOT NULL,
+      confidence REAL NOT NULL,
+      timestamp INTEGER NOT NULL,
+      session_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_unused_project ON unused_code(project_path);
+    CREATE INDEX IF NOT EXISTS idx_unused_file ON unused_code(file_path);
+    CREATE INDEX IF NOT EXISTS idx_unused_type ON unused_code(symbol_type);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS unused_code_fts USING fts5(
+      file_path, symbol_name, symbol_type,
+      content='unused_code',
+      content_rowid='id',
+      tokenize='unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS unused_code_ai AFTER INSERT ON unused_code BEGIN
+      INSERT INTO unused_code_fts(rowid, file_path, symbol_name, symbol_type)
+      VALUES (new.id, new.file_path, new.symbol_name, new.symbol_type);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS unused_code_ad AFTER DELETE ON unused_code BEGIN
+      INSERT INTO unused_code_fts(unused_code_fts, rowid, file_path, symbol_name, symbol_type)
+      VALUES ('delete', old.id, old.file_path, old.symbol_name, old.symbol_type);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS unused_code_au AFTER UPDATE ON unused_code BEGIN
+      INSERT INTO unused_code_fts(unused_code_fts, rowid, file_path, symbol_name, symbol_type)
+      VALUES ('delete', old.id, old.file_path, old.symbol_name, old.symbol_type);
+      INSERT INTO unused_code_fts(rowid, file_path, symbol_name, symbol_type)
+      VALUES (new.id, new.file_path, new.symbol_name, new.symbol_type);
+    END;
+
+    -- Code Duplicates (дубликаты кода)
+    CREATE TABLE IF NOT EXISTS code_duplicates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_path TEXT NOT NULL,
+      file_path_1 TEXT NOT NULL,
+      file_path_2 TEXT NOT NULL,
+      line_start_1 INTEGER NOT NULL,
+      line_end_1 INTEGER NOT NULL,
+      line_start_2 INTEGER NOT NULL,
+      line_end_2 INTEGER NOT NULL,
+      lines_count INTEGER NOT NULL,
+      tokens_count INTEGER NOT NULL,
+      similarity REAL NOT NULL,
+      timestamp INTEGER NOT NULL,
+      session_id TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_dup_project ON code_duplicates(project_path);
+    CREATE INDEX IF NOT EXISTS idx_dup_file1 ON code_duplicates(file_path_1);
+    CREATE INDEX IF NOT EXISTS idx_dup_file2 ON code_duplicates(file_path_2);
+    CREATE INDEX IF NOT EXISTS idx_dup_similarity ON code_duplicates(similarity DESC);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS code_duplicates_fts USING fts5(
+      file_path_1, file_path_2,
+      content='code_duplicates',
+      content_rowid='id',
+      tokenize='unicode61'
+    );
+
+    CREATE TRIGGER IF NOT EXISTS code_duplicates_ai AFTER INSERT ON code_duplicates BEGIN
+      INSERT INTO code_duplicates_fts(rowid, file_path_1, file_path_2)
+      VALUES (new.id, new.file_path_1, new.file_path_2);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_duplicates_ad AFTER DELETE ON code_duplicates BEGIN
+      INSERT INTO code_duplicates_fts(code_duplicates_fts, rowid, file_path_1, file_path_2)
+      VALUES ('delete', old.id, old.file_path_1, old.file_path_2);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS code_duplicates_au AFTER UPDATE ON code_duplicates BEGIN
+      INSERT INTO code_duplicates_fts(code_duplicates_fts, rowid, file_path_1, file_path_2)
+      VALUES ('delete', old.id, old.file_path_1, old.file_path_2);
+      INSERT INTO code_duplicates_fts(rowid, file_path_1, file_path_2)
+      VALUES (new.id, new.file_path_1, new.file_path_2);
     END;
   `);
 }

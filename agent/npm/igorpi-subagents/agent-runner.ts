@@ -2,10 +2,12 @@
  * agent-runner.ts — Core execution engine: creates sessions, runs agents, collects results.
  * Phase 4B: Injects relevant facts from session memory into subagent prompts.
  * Phase 6: Generates detailedSummary and meta for all agents (main + subagents).
+ * v15: Добавлен эмит subagents:file_edited для интеграции с igorpi-code-analysis
+ * v16: Эмит добавлен в resumeAgent + нормализация путей
  */
 
 import { homedir } from "node:os";
-import { basename, dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve, join } from "node:path";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, LoadExtensionsResult } from "@earendil-works/pi-coding-agent";
 import {
@@ -42,12 +44,13 @@ const EXCLUDED_TOOL_NAMES: string[] = Object.values(SUBAGENT_TOOL_NAMES);
 // ============================================================================
 // ФАЗА 6: Обновлённый интерфейс CompactionInfo
 // ============================================================================
+
 export interface CompactionInfo {
   reason: "manual" | "threshold" | "overflow";
   tokensBefore: number;
   summary?: string;
-  detailedSummary?: string;  // ← НОВОЕ: структурированный дамп
-  meta?: CompactionMeta;     // ← НОВОЕ: ключевые слова
+  detailedSummary?: string;
+  meta?: CompactionMeta;
 }
 
 export function extensionCanonicalName(extPath: string): string {
@@ -65,6 +68,7 @@ export function parseExtensionsSpec(
   const names = new Set<string>();
   const paths: string[] = [];
   let wildcard = false;
+
   for (const entry of entries) {
     if (!entry) continue;
     if (entry === "*") {
@@ -93,6 +97,7 @@ export function parseExtSelectors(entries: string[]): {
 } {
   const extNames = new Set<string>();
   const narrowing = new Map<string, Set<string>>();
+
   for (const raw of entries) {
     if (!raw) continue;
     const body = raw.slice("ext:".length);
@@ -172,7 +177,7 @@ export interface RunOptions {
   onSessionCreated?: (session: AgentSession) => void;
   onTurnEnd?: (turnCount: number) => void;
   onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-  onCompaction?: (info: CompactionInfo) => void;  // ← Обновлено: теперь CompactionInfo
+  onCompaction?: (info: CompactionInfo) => void;
 }
 
 export interface RunResult {
@@ -219,6 +224,37 @@ function resolveConfiguredSessionDir(sessionDir: string | undefined, cwd: string
   return resolve(cwd, sessionDir);
 }
 
+// ============================================================================
+// v16: Вспомогательная функция для эмитта события file_edited
+// ============================================================================
+
+function emitFileEditedEvent(
+  pi: ExtensionAPI,
+  agentId: string | undefined,
+  agentType: string,
+  toolName: string,
+  filePath: string,
+  cwd: string
+): void {
+  if (toolName !== "edit" && toolName !== "write") return;
+  if (!filePath) return;
+
+  // v16: Нормализация пути — относительный → абсолютный
+  const normalizedPath = isAbsolute(filePath) ? filePath : join(cwd, filePath);
+
+  try {
+    pi.events.emit("subagents:file_edited", {
+      agentId: agentId || "unknown",
+      agentType: agentType,
+      toolName: toolName,
+      filePath: normalizedPath,
+      cwd: cwd,
+    });
+  } catch (err) {
+    console.error(`[igorpi-subagents] ❌ Failed to emit subagents:file_edited:`, err);
+  }
+}
+
 export async function runAgent(
   ctx: ExtensionContext,
   type: SubagentType,
@@ -227,15 +263,11 @@ export async function runAgent(
 ): Promise<RunResult> {
   const config = getConfig(type);
   const agentConfig = getAgentConfig(type);
-
   const effectiveCwd = options.cwd ?? ctx.cwd;
   const configCwd = options.configCwd ?? effectiveCwd;
-
   const env = await detectEnv(options.pi, effectiveCwd);
   const parentSystemPrompt = ctx.getSystemPrompt();
-
   const extras: PromptExtras = {};
-
   const extensions = options.isolated ? false : config.extensions;
   const excludeExtensions = options.isolated ? undefined : config.excludeExtensions;
   const skills = options.isolated ? false : config.skills;
@@ -243,23 +275,19 @@ export async function runAgent(
   let toolNames = getToolNamesForType(type);
 
   // ==========================================================================
-  // ФАЗА 4B: Получение релевантных фактов из памяти (через injected dependency)
+  // ФАЗА 4B: Получение релевантных фактов из памяти
   // ==========================================================================
   let memoryBlock: string | undefined;
   const memoryDb = options.memoryDb ?? MemoryDatabase.getInstance();
   if (memoryDb) {
     try {
       const sessionMemory = getSessionMemory(memoryDb);
-      
       console.log(`[igorpi-subagents] 🔍 Searching facts for prompt: "${prompt.slice(0, 100)}..."`);
-      
       const relevantFacts = sessionMemory.getRelevantFacts(prompt, 5);
-      
       console.log(`[igorpi-subagents] 🔍 Found ${relevantFacts.length} relevant facts`);
       for (const fact of relevantFacts) {
         console.log(`[igorpi-subagents] 🔍   - [${fact.fact_type}] ${fact.content.slice(0, 50)}`);
       }
-      
       if (relevantFacts.length > 0) {
         const iconMap: Record<string, string> = {
           decision: "🎯",
@@ -268,14 +296,13 @@ export async function runAgent(
           architecture: "🏗️",
           api: "🔌",
         };
-        
         const factLines = relevantFacts.map((fact: any) => {
           const icon = iconMap[fact.fact_type] || "📝";
           return `- ${icon} [${fact.fact_type}] ${fact.content}`;
         });
-        
-        memoryBlock = `# Session Memory\nRelevant context from previous sessions:\n${factLines.join("\n")}`;
-        
+        memoryBlock = `# Session Memory
+Relevant context from previous sessions:
+${factLines.join("\n")}`;
         console.log(`[igorpi-subagents] 🧠 Injected ${relevantFacts.length} relevant facts into subagent prompt`);
       }
     } catch (err) {
@@ -308,12 +335,10 @@ export async function runAgent(
 
   const noSkills = skills === false || Array.isArray(skills);
   const agentDir = getAgentDir();
-
   const { extNames, narrowing } = parseExtSelectors(
     options.isolated ? [] : (agentConfig?.extSelectors ?? []),
   );
   const noExtensions = extensions === false;
-
   const extensionsSpec = Array.isArray(extensions)
     ? parseExtensionsSpec(extensions, configCwd)
     : undefined;
@@ -322,6 +347,7 @@ export async function runAgent(
   const hasExcludes = excludeNames.size > 0;
   const loadAll = extensions === true || extensionsSpec?.wildcard === true;
   const additionalExtensionPaths = extensionsSpec?.paths.length ? extensionsSpec.paths : undefined;
+
   let discoveredNames: Set<string> | undefined;
   const extensionsOverride: ((base: LoadExtensionsResult) => LoadExtensionsResult) | undefined =
     noExtensions || (loadAll && !hasExcludes)
@@ -351,6 +377,7 @@ export async function runAgent(
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
   });
+
   await loader.reload();
 
   if (agentConfig?.builtinToolNames?.length) {
@@ -371,6 +398,7 @@ export async function runAgent(
       toolName: `extension-error:exclude_extensions has no effect for agent "${type}" — extensions: false loads nothing`,
     });
   }
+
   if (hasExcludes && discoveredNames) {
     for (const name of excludeNames) {
       if (!discoveredNames.has(name)) {
@@ -381,6 +409,7 @@ export async function runAgent(
       }
     }
   }
+
   if (keepNames.size > 0 || extNames.size > 0) {
     const survivingNames = new Set(
       loader.getExtensions().extensions.map((e) => extensionCanonicalName(e.path)),
@@ -409,11 +438,9 @@ export async function runAgent(
     ctx.model, ctx.modelRegistry, agentConfig?.model,
   );
   const thinkingLevel = options.thinkingLevel ?? agentConfig?.thinking;
-
   const disallowedSet = agentConfig?.disallowedTools
     ? new Set(agentConfig.disallowedTools)
     : undefined;
-
   const extensionToolNames: string[] = [];
   if (!noExtensions) {
     const optInActive = extNames.size > 0;
@@ -453,6 +480,7 @@ export async function runAgent(
     tools: allowedTools,
     resourceLoader: loader,
   };
+
   if (thinkingLevel) {
     sessionOpts.thinkingLevel = thinkingLevel;
   }
@@ -479,8 +507,8 @@ export async function runAgent(
   const maxTurns = normalizeMaxTurns(options.maxTurns ?? agentConfig?.maxTurns ?? defaultMaxTurns);
   let softLimitReached = false;
   let aborted = false;
-
   let currentMessageText = "";
+
   const unsubTurns = session.subscribe((event: AgentSessionEvent) => {
     if (event.type === "turn_end") {
       turnCount++;
@@ -507,6 +535,14 @@ export async function runAgent(
     }
     if (event.type === "tool_execution_end") {
       options.onToolActivity?.({ type: "end", toolName: event.toolName });
+
+      // ====================================================================
+      // v16: Эмит события для igorpi-code-analysis при edit/write
+      // ====================================================================
+      if (event.toolName === "edit" || event.toolName === "write") {
+        const filePath = ((event as any).input as any)?.path;
+        emitFileEditedEvent(options.pi, options.agentId, type, event.toolName, filePath, effectiveCwd);
+      }
     }
     if (event.type === "message_end" && event.message.role === "assistant") {
       const u = (event.message as any).usage;
@@ -516,14 +552,13 @@ export async function runAgent(
         cacheWrite: u.cacheWrite ?? 0,
       });
     }
-    
+
     // ==========================================================================
     // ФАЗА 6: Генерация detailedSummary и meta для ВСЕХ агентов
     // ==========================================================================
     if (event.type === "compaction_end" && !event.aborted && event.result) {
       let detailedSummary = "";
       let meta: CompactionMeta | undefined;
-      
       const preparation = (event.result as any).preparation;
       if (preparation?.messagesToSummarize?.length > 0) {
         try {
@@ -533,7 +568,6 @@ export async function runAgent(
           );
           detailedSummary = result.detailed;
           meta = result.meta;
-          
           console.log(
             `[igorpi-subagents] 📦 Generated compaction summary for agent ${options.agentId || type}: ` +
             `${preparation.messagesToSummarize.length} msgs, ` +
@@ -544,11 +578,8 @@ export async function runAgent(
           console.error(`[igorpi-subagents] ❌ Failed to generate compaction summary for agent ${options.agentId || type}:`, err);
         }
       }
-      
-      // Guard: event.result may be truthy but missing summary/tokensBefore
-      // Guard: event.reason may be undefined on compaction_end events
       if (event.result && typeof event.result.summary === 'string') {
-        options.onCompaction?.({ 
+        options.onCompaction?.({
           reason: event.reason ?? 'threshold',
           tokensBefore: event.result.tokensBefore,
           summary: event.result.summary,
@@ -586,19 +617,37 @@ export async function resumeAgent(
   session: AgentSession,
   prompt: string,
   options: {
+    pi?: ExtensionAPI;
+    agentId?: string;
+    agentType?: string;
+    cwd?: string;
     onToolActivity?: (activity: ToolActivity) => void;
     onAssistantUsage?: (usage: { input: number; output: number; cacheWrite: number }) => void;
-    onCompaction?: (info: CompactionInfo) => void;  // ← Обновлено: теперь CompactionInfo
+    onCompaction?: (info: CompactionInfo) => void;
     signal?: AbortSignal;
   } = {},
 ): Promise<string> {
   const collector = collectResponseText(session);
   const cleanupAbort = forwardAbortSignal(session, options.signal);
 
-  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction)
+  // v16: Добавляем pi, agentId, agentType, cwd для эмитта событий
+  const pi = options.pi;
+  const agentId = options.agentId;
+  const agentType = options.agentType || "unknown";
+  const cwd = options.cwd || process.cwd();
+
+  const unsubEvents = (options.onToolActivity || options.onAssistantUsage || options.onCompaction || pi)
     ? session.subscribe((event: AgentSessionEvent) => {
         if (event.type === "tool_execution_start") options.onToolActivity?.({ type: "start", toolName: event.toolName });
-        if (event.type === "tool_execution_end") options.onToolActivity?.({ type: "end", toolName: event.toolName });
+        if (event.type === "tool_execution_end") {
+          options.onToolActivity?.({ type: "end", toolName: event.toolName });
+
+          // v16: Эмит события для igorpi-code-analysis при edit/write
+          if (pi && (event.toolName === "edit" || event.toolName === "write")) {
+            const filePath = ((event as any).input as any)?.path;
+            emitFileEditedEvent(pi, agentId, agentType, event.toolName, filePath, cwd);
+          }
+        }
         if (event.type === "message_end" && event.message.role === "assistant") {
           const u = (event.message as any).usage;
           if (u) options.onAssistantUsage?.({
@@ -607,14 +656,9 @@ export async function resumeAgent(
             cacheWrite: u.cacheWrite ?? 0,
           });
         }
-        
-        // ==========================================================================
-        // ФАЗА 6: Генерация detailedSummary и meta для resumed agents
-        // ==========================================================================
         if (event.type === "compaction_end" && !event.aborted && event.result) {
           let detailedSummary = "";
           let meta: CompactionMeta | undefined;
-          
           const preparation = (event.result as any).preparation;
           if (preparation?.messagesToSummarize?.length > 0) {
             try {
@@ -624,7 +668,6 @@ export async function resumeAgent(
               );
               detailedSummary = result.detailed;
               meta = result.meta;
-              
               console.log(
                 `[igorpi-subagents] 📦 Generated compaction summary for resumed agent: ` +
                 `${preparation.messagesToSummarize.length} msgs, ` +
@@ -634,11 +677,8 @@ export async function resumeAgent(
               console.error(`[igorpi-subagents] ❌ Failed to generate compaction summary for resumed agent:`, err);
             }
           }
-          
-          // Guard: event.result may be truthy but missing summary/tokensBefore
-          // Guard: event.reason may be undefined on compaction_end events
           if (event.result && typeof event.result.summary === 'string') {
-            options.onCompaction?.({ 
+            options.onCompaction?.({
               reason: event.reason ?? 'threshold',
               tokensBefore: event.result.tokensBefore,
               summary: event.result.summary,
@@ -670,7 +710,6 @@ export async function steerAgent(
 
 export function getAgentConversation(session: AgentSession): string {
   const parts: string[] = [];
-
   for (const msg of session.messages) {
     if (msg.role === "user") {
       const text = typeof msg.content === "string"
@@ -692,6 +731,5 @@ export function getAgentConversation(session: AgentSession): string {
       parts.push(`[Tool Result (${msg.toolName})]: ${truncated}`);
     }
   }
-
-  return parts.join("\n\n");
+  return parts.join("\n");
 }

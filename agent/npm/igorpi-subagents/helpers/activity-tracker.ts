@@ -2,7 +2,7 @@
  * activity-tracker.ts — Трекинг активности субагентов и вспомогательные функции.
  */
 
-import { type AgentActivity, formatDuration, formatTokens } from "../ui/agent-widget.js";
+import { type AgentActivity, formatTokens } from "../ui/agent-widget.js";
 import { addUsage, getLifetimeTotal, type LifetimeUsage } from "../usage.js";
 
 export interface AgentDetails {

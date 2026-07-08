@@ -36,7 +36,9 @@ export class ActivityMonitor {
 		windowMs: 60 * 1000, // 100 запросов в минуту
 	};
 
-	logStart(partial: Omit<ActivityEntry, "id" | "startTime" | "status">): string {
+	logStart(
+		partial: Omit<ActivityEntry, "id" | "startTime" | "status">,
+	): string {
 		const id = this.generateId();
 		const entry: ActivityEntry = {
 			...partial,
@@ -106,7 +108,7 @@ export class ActivityMonitor {
 	// ✅ Реальная реализация вместо заглушки
 	getRateLimitInfo(): RateLimitInfo {
 		this.pruneOldTimestamps();
-		const now = Date.now();
+		Date.now();
 		const oldest = this.apiTimestamps.length > 0 ? this.apiTimestamps[0] : null;
 
 		return {

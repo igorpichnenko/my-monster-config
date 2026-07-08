@@ -8,20 +8,21 @@
  * - compaction_summaries (summary компакции контекста)
  * - compressed_results (сжатые результаты)
  * - compaction_keywords (нормализованные ключевые слова компакций)
- * - failures (память о неудачах) — v9.2 fix
+ * - failures (память о неудачах)
+ * - code_diagnostics (ошибки TypeScript/Python/C++) — v14
+ * - code_dependencies (зависимости между файлами) — v14
+ * - unused_code (неиспользуемый код) — v14
+ * - code_duplicates (дубликаты кода) — v14
  * 
  * Поддерживает специальные запросы:
  * - "id:<number>" — получение полного вывода по числовому ID
- * - "id:<uuid>" — получение результата субагента по UUID (полному или укороченному)
+ * - "id:<uuid>" — получение результата субагента по UUID
  * 
- * Phase 12: Priority-based sorting
- * v9: Исправлена обработка строковых ID для subagent_results
- * v9.1: Добавлена поддержка укороченных UUID
- * v9.2: Добавлен поиск по failures
- * v12: Исправлено экранирование FTS5 и поиск по keyword ID
+ * v14: Добавлен поиск по code analysis таблицам
+ * v14.2: Исправлен projectPath — используем process.cwd() напрямую
  */
 
-import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword, type FailureRecord, priorityEmoji, escapeFts5Query, type Priority } from "../../igorpi-memory/index.js";
+import { MemoryDatabase, type ToolOutput, type SubagentResult, type SessionFact, type CompactionSummary, type CompressedResult, type CompactionKeyword, type FailureRecord, type CodeDiagnostic, type CodeDependency, type UnusedCode, type CodeDuplicate, priorityEmoji, escapeFts5Query, type Priority } from "../../igorpi-memory/index.js";
 
 export interface CtxSearchArgs {
   query: string;
@@ -29,7 +30,9 @@ export interface CtxSearchArgs {
 }
 
 interface SearchResult {
-  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | "compressed_result" | "compaction_keywords_group" | "failure_record";
+  type: "tool_output" | "subagent_result" | "session_fact" | "compaction_summary" | 
+        "compressed_result" | "compaction_keywords_group" | "failure_record" |
+        "code_diagnostic" | "code_dependency" | "unused_code" | "code_duplicate";
   id: number | string;
   title: string;
   date: string;
@@ -40,18 +43,11 @@ interface SearchResult {
 
 /**
  * Проверяет, похожа ли строка на UUID (полный или укороченный).
- * 
- * Поддерживает форматы:
- * - Полный UUID: 28622e05-cd3b-4923-8f1a-5b7c9d4e6f8a
- * - Укороченный: 28622e05-cd3b-492 (то что показывает pi)
- * - Короткий префикс: 28622e05
  */
 function looksLikeSubagentId(str: string): boolean {
-  // Содержит hex + дефис → скорее всего UUID или его часть
   if (/^[0-9a-f]+-[0-9a-f]+/i.test(str)) {
     return true;
   }
-  // Чистый hex от 6 символов (короткий префикс)
   if (/^[0-9a-f]{6,}$/i.test(str) && !/^\d+$/.test(str)) {
     return true;
   }
@@ -59,14 +55,12 @@ function looksLikeSubagentId(str: string): boolean {
 }
 
 /**
- * Находит subagent_result по ID (полному, укороченному или префиксу).
+ * Находит subagent_result по ID.
  */
 function findSubagentResultById(db: MemoryDatabase, idStr: string): SubagentResult | null {
-  // 1. Попытка точного совпадения (полный UUID)
   const exact = db.getSubagentResult(idStr);
   if (exact) return exact;
   
-  // 2. Поиск по префиксу в БД напрямую
   const raw = db.getRaw();
   const rows = raw.prepare(`
     SELECT * FROM subagent_results
@@ -78,37 +72,13 @@ function findSubagentResultById(db: MemoryDatabase, idStr: string): SubagentResu
   return rows[0] || null;
 }
 
-/**
- * Экранирует запрос для FTS5 MATCH.
- * 
- * v12: Исправлено — теперь экранирует ВСЕ спецсимволы FTS5,
- *      а не только двойные кавычки.
- * 
- * Спецсимволы FTS5: + - * ~ ( ) | & { } ^ "
- * Решение: заменяем их на пробелы и оборачиваем в кавычки для поиска фразы целиком.
- */
-/* function escapeFts5Query(query: string): string {
-  // Экранируем все спецсимволы FTS5
-  const cleaned = query
-    .replace(/"/g, '')                    // убираем кавычки
-    .replace(/[+\-*~()|&{}^]/g, ' ')     // заменяем спецсимволы на пробелы
-    .replace(/\s+/g, ' ')                 // убираем множественные пробелы
-    .trim();
-  
-  // Если после очистки ничего не осталось — возвращаем пустой запрос
-  if (!cleaned) {
-    return '""';
-  }
-  
-  // Оборачиваем в кавычки для поиска фразы целиком
-  return `"${cleaned}"`;
-} */
-
 export function executeCtxSearch(
   args: CtxSearchArgs,
   db: MemoryDatabase
 ): string {
   const { query, limit = 10 } = args;
+  // v14.2: Используем process.cwd() напрямую для совпадения с igorpi-code-analysis
+  const projectPath = process.cwd();
   
   // Специальный запрос для получения полного вывода по ID
   if (query.startsWith("id:")) {
@@ -118,7 +88,7 @@ export function executeCtxSearch(
       return `❌ Empty ID. Use: id:<number> or id:<uuid>`;
     }
     
-    // v9.1: Сначала проверяем, похож ли ID на subagent ID
+    // Subagent ID
     if (looksLikeSubagentId(idStr)) {
       const subagentResult = findSubagentResultById(db, idStr);
       if (subagentResult) {
@@ -131,18 +101,16 @@ export function executeCtxSearch(
                `Duration: ${subagentResult.duration_ms}ms\n\n` +
                subagentResult.result;
       }
-      return `❌ No subagent result found with ID: ${idStr}\n` +
-             `💡 Tip: pi uses shortened UUIDs. Try the ID from ctx_search results ` +
-             `(e.g., "28622e05-cd3b-492") or just the first 8 characters.`;
+      return `❌ No subagent result found with ID: ${idStr}`;
     }
     
-    // Числовой ID — для остальных таблиц
+    // Числовой ID
     const id = parseInt(idStr);
     if (isNaN(id)) {
       return `❌ Invalid ID format. Use: id:<number> or id:<uuid>`;
     }
     
-    // 1. Ищем в tool_outputs
+    // 1. tool_outputs
     const toolOutput = db.getToolOutput(id);
     if (toolOutput) {
       const emoji = priorityEmoji(toolOutput.priority as Priority);
@@ -154,7 +122,7 @@ export function executeCtxSearch(
              toolOutput.output;
     }
     
-    // 2. Ищем в session_facts
+    // 2. session_facts
     const fact = db.getFactById(id);
     if (fact) {
       return `━━━ Full Session Fact [ID: ${fact.id}] ━━━\n` +
@@ -163,7 +131,7 @@ export function executeCtxSearch(
              fact.content;
     }
     
-    // 3. Ищем в compaction_summaries
+    // 3. compaction_summaries
     const summary = db.getCompactionSummaryById(id);
     if (summary) {
       let result = `━━━ Full Compaction Summary [ID: ${summary.id}] ━━━\n` +
@@ -177,7 +145,7 @@ export function executeCtxSearch(
       return result;
     }
     
-    // 4. Ищем в compressed_results
+    // 4. compressed_results
     const compressedResult = db.getCompressedResultById(id);
     if (compressedResult) {
       return `━━━ Full Compressed Result [ID: ${compressedResult.id}] ━━━\n` +
@@ -186,7 +154,7 @@ export function executeCtxSearch(
              compressedResult.compressed;
     }
     
-    // 5. Ищем в failures — v9.2 fix
+    // 5. failures
     const failure = db.getFailureById(id);
     if (failure) {
       let result = `━━━ ⚠️ Full Failure Record [ID: ${failure.id}] ━━━\n` +
@@ -194,24 +162,16 @@ export function executeCtxSearch(
                    `Date: ${new Date(failure.timestamp).toLocaleString()}\n\n`;
       result += `## Approach\n${failure.approach}\n\n`;
       result += `## Error\n${failure.error}\n\n`;
-      if (failure.reason) {
-        result += `## Reason\n${failure.reason}\n\n`;
-      }
-      if (failure.solution) {
-        result += `## Solution\n${failure.solution}\n\n`;
-      }
-      if (failure.context) {
-        result += `## Context\n${failure.context}\n`;
-      }
+      if (failure.reason) result += `## Reason\n${failure.reason}\n\n`;
+      if (failure.solution) result += `## Solution\n${failure.solution}\n\n`;
+      if (failure.context) result += `## Context\n${failure.context}\n`;
       return result;
     }
     
-    // 6. Ищем в compaction_keywords по ID keyword — v12 fix
-    // Используем getKeywordById вместо getCompactionKeywords для корректного поиска
+    // 6. compaction_keywords
     const keyword = db.getKeywordById(id);
     if (keyword) {
       const compaction = db.getCompactionSummaryById(keyword.compaction_id);
-      
       if (compaction) {
         let result = `━━━ Compaction Summary [ID: ${compaction.id}] ━━━\n`;
         result += `(Found via keyword ID: ${id}, keyword: "${keyword.keyword}")\n\n`;
@@ -219,49 +179,81 @@ export function executeCtxSearch(
         result += `Tokens before: ${compaction.tokens_before}\n`;
         result += `Date: ${new Date(compaction.timestamp).toLocaleString()}\n\n`;
         result += `## Summary\n${compaction.summary}\n\n`;
-        
         if (compaction.detailed_summary) {
           result += `## Detailed Summary\n${compaction.detailed_summary}\n\n`;
         }
-        
-        // Показываем все keywords этой компакции
-        const allKeywords = db.getCompactionKeywords(compaction.id);
-        const byCategory: Record<string, string[]> = {
-          file: [],
-          decision: [],
-          lesson: [],
-        };
-        
-        for (const kw of allKeywords) {
-          byCategory[kw.category].push(kw.keyword);
-        }
-        
-        result += `## Keywords\n`;
-        if (byCategory.file.length > 0) {
-          result += `📄 Files: ${byCategory.file.join(", ")}\n`;
-        }
-        if (byCategory.decision.length > 0) {
-          result += `🎯 Decisions: ${byCategory.decision.join(", ")}\n`;
-        }
-        if (byCategory.lesson.length > 0) {
-          result += `💡 Lessons: ${byCategory.lesson.join(", ")}\n`;
-        }
-        
         return result;
       }
     }
+    
+    // 7. code_diagnostics — v14
+    const diagnostic = db.getDiagnosticById(id);
+    if (diagnostic) {
+      const icon = diagnostic.severity === "error" ? "❌" : 
+                   diagnostic.severity === "warning" ? "⚠️" : "ℹ️";
+      let result = `━━━ ${icon} Code Diagnostic [ID: ${diagnostic.id}] ━━━\n` +
+                   `File: ${diagnostic.file_path}\n` +
+                   `Location: Line ${diagnostic.line}, Column ${diagnostic.column}\n` +
+                   `Severity: ${diagnostic.severity}\n` +
+                   `Source: ${diagnostic.source}\n` +
+                   `Date: ${new Date(diagnostic.timestamp).toLocaleString()}\n\n`;
+      result += `## Message\n${diagnostic.message}\n\n`;
+      if (diagnostic.rule_id) result += `Rule: ${diagnostic.rule_id}\n`;
+      if (diagnostic.suggestion) result += `\n## Suggestion\n${diagnostic.suggestion}\n`;
+      return result;
+    }
+    
+    // 8. code_dependencies — v14 (по ID связи)
+    try {
+      const raw = db.getRaw();
+      const dep = raw.prepare("SELECT * FROM code_dependencies WHERE id = ?").get(id) as CodeDependency | undefined;
+      if (dep) {
+        return `━━━ 🔗 Code Dependency [ID: ${dep.id}] ━━━\n` +
+               `File: ${dep.file_path}\n` +
+               `Depends on: ${dep.depends_on}\n` +
+               `Type: ${dep.dependency_type}\n` +
+               `Circular: ${dep.is_circular ? "🔄 YES" : "No"}\n` +
+               `Date: ${new Date(dep.timestamp).toLocaleString()}\n`;
+      }
+    } catch {}
+    
+    // 9. unused_code — v14
+    try {
+      const raw = db.getRaw();
+      const unused = raw.prepare("SELECT * FROM unused_code WHERE id = ?").get(id) as UnusedCode | undefined;
+      if (unused) {
+        return `━━━ 🗑️ Unused Code [ID: ${unused.id}] ━━━\n` +
+               `File: ${unused.file_path}\n` +
+               `Symbol: ${unused.symbol_name} (${unused.symbol_type})\n` +
+               `Line: ${unused.line}\n` +
+               `Confidence: ${Math.round(unused.confidence * 100)}%\n` +
+               `Date: ${new Date(unused.timestamp).toLocaleString()}\n`;
+      }
+    } catch {}
+    
+    // 10. code_duplicates — v14
+    try {
+      const raw = db.getRaw();
+      const dup = raw.prepare("SELECT * FROM code_duplicates WHERE id = ?").get(id) as CodeDuplicate | undefined;
+      if (dup) {
+        return `━━━ 📋 Code Duplicate [ID: ${dup.id}] ━━━\n` +
+               `File 1: ${dup.file_path_1} (lines ${dup.line_start_1}-${dup.line_end_1})\n` +
+               `File 2: ${dup.file_path_2} (lines ${dup.line_start_2}-${dup.line_end_2})\n` +
+               `Lines: ${dup.lines_count}\n` +
+               `Similarity: ${Math.round(dup.similarity * 100)}%\n` +
+               `Date: ${new Date(dup.timestamp).toLocaleString()}\n`;
+      }
+    } catch {}
     
     return `❌ No result found with ID: ${id}`;
   }
   
   // Объединённый поиск по всем таблицам с FTS5
   try {
-    // v12: Экранируем запрос для FTS5
     const escapedQuery = escapeFts5Query(query);
-    
     const allResults: SearchResult[] = [];
     
-    // 1. Tool outputs — уже отсортированы по priority DESC, timestamp DESC
+    // 1. Tool outputs
     const toolResults = db.searchToolOutputs(escapedQuery, limit);
     for (const r of toolResults) {
       const emoji = priorityEmoji(r.priority as Priority);
@@ -271,11 +263,7 @@ export function executeCtxSearch(
         title: `${emoji} Tool: ${r.tool_name}`,
         date: new Date(r.timestamp).toLocaleString(),
         preview: r.summary || r.output.slice(0, 100),
-        extra: { 
-          Args: r.args, 
-          Size: `${r.size} chars`,
-          Priority: `${r.priority} ${emoji}`,
-        },
+        extra: { Args: r.args, Size: `${r.size} chars`, Priority: `${r.priority} ${emoji}` },
         priority: r.priority as Priority,
       });
     }
@@ -310,7 +298,6 @@ export function executeCtxSearch(
     const compactionResults = db.searchCompactionSummaries(escapedQuery, limit);
     for (const r of compactionResults) {
       const preview = r.detailed_summary?.slice(0, 500) || r.summary?.slice(0, 300) || "";
-      
       allResults.push({
         type: "compaction_summary",
         id: r.id,
@@ -334,9 +321,8 @@ export function executeCtxSearch(
       });
     }
     
-    // 6. Compaction keywords — группируем по compaction_id
+    // 6. Compaction keywords
     const keywordResults = db.searchKeywords(escapedQuery, limit * 3);
-    
     const groupedKeywords = new Map<number, {
       keywords: typeof keywordResults;
       reason: string;
@@ -357,42 +343,26 @@ export function executeCtxSearch(
     }
     
     for (const [compactionId, group] of groupedKeywords) {
-      const files = group.keywords
-        .filter(k => k.category === "file")
-        .map(k => k.keyword)
-        .slice(0, 3);
-      
-      const decisions = group.keywords
-        .filter(k => k.category === "decision")
-        .map(k => k.keyword)
-        .slice(0, 2);
-      
-      const lessons = group.keywords
-        .filter(k => k.category === "lesson")
-        .map(k => k.keyword)
-        .slice(0, 2);
+      const files = group.keywords.filter(k => k.category === "file").map(k => k.keyword).slice(0, 3);
+      const decisions = group.keywords.filter(k => k.category === "decision").map(k => k.keyword).slice(0, 2);
+      const lessons = group.keywords.filter(k => k.category === "lesson").map(k => k.keyword).slice(0, 2);
       
       let preview = "";
       if (files.length > 0) preview += `📄 ${files.join(", ")}`;
       if (decisions.length > 0) preview += ` | 🎯 ${decisions.join(", ")}`;
       if (lessons.length > 0) preview += ` | 💡 ${lessons.join(", ")}`;
       
-      const totalKeywords = group.keywords.length;
-      
       allResults.push({
         type: "compaction_keywords_group",
         id: compactionId,
         title: `Compaction Keywords: [${group.reason}] ${group.tokens_before} tokens`,
         date: new Date(group.timestamp).toLocaleString(),
-        preview: preview || `${totalKeywords} keywords found`,
-        extra: { 
-          "Keywords count": String(totalKeywords),
-          "Compaction ID": String(compactionId),
-        },
+        preview: preview || `${group.keywords.length} keywords found`,
+        extra: { "Keywords count": String(group.keywords.length), "Compaction ID": String(compactionId) },
       });
     }
     
-    // 7. Failures (неудачные подходы) — v9.2 fix
+    // 7. Failures
     const failureResults = db.searchFailures(escapedQuery, limit);
     for (const r of failureResults) {
       allResults.push({
@@ -401,17 +371,88 @@ export function executeCtxSearch(
         title: `⚠️ Failure: ${r.approach?.slice(0, 50) || "Unknown approach"}`,
         date: new Date(r.timestamp).toLocaleString(),
         preview: r.error?.slice(0, 150) || "",
-        extra: {
-          "Session": r.session_id,
-          "Solution": r.solution?.slice(0, 80) || "N/A",
-        },
+        extra: { "Session": r.session_id, "Solution": r.solution?.slice(0, 80) || "N/A" },
       });
+    }
+    
+    // 8. Code diagnostics — v14
+    if (projectPath) {
+      const diagnosticResults = db.searchDiagnostics(escapedQuery, projectPath, limit);
+      for (const r of diagnosticResults) {
+        const icon = r.severity === "error" ? "❌" : r.severity === "warning" ? "⚠️" : "ℹ️";
+        allResults.push({
+          type: "code_diagnostic",
+          id: r.id,
+          title: `${icon} [${r.severity}] ${r.file_path}:${r.line}:${r.column}`,
+          date: new Date(r.timestamp).toLocaleString(),
+          preview: r.message.slice(0, 150),
+          extra: {
+            "Source": r.source,
+            "Rule": r.rule_id || "N/A",
+            "File": r.file_path,
+          },
+        });
+      }
+    }
+    
+    // 9. Code dependencies — v14
+    if (projectPath) {
+      const depResults = db.searchDependencies(escapedQuery, projectPath, limit);
+      for (const r of depResults) {
+        allResults.push({
+          type: "code_dependency",
+          id: r.id,
+          title: `🔗 ${r.file_path} → ${r.depends_on}`,
+          date: new Date(r.timestamp).toLocaleString(),
+          preview: `Dependency type: ${r.dependency_type}${r.is_circular ? " (🔄 CIRCULAR)" : ""}`,
+          extra: {
+            "Type": r.dependency_type,
+            "Circular": r.is_circular ? "YES" : "No",
+          },
+        });
+      }
+    }
+    
+    // 10. Unused code — v14
+    if (projectPath) {
+      const unusedResults = db.searchUnused(escapedQuery, projectPath, limit);
+      for (const r of unusedResults) {
+        allResults.push({
+          type: "unused_code",
+          id: r.id,
+          title: `🗑️ ${r.symbol_name} (${r.symbol_type}) in ${r.file_path}:${r.line}`,
+          date: new Date(r.timestamp).toLocaleString(),
+          preview: `Confidence: ${Math.round(r.confidence * 100)}%`,
+          extra: {
+            "Symbol": r.symbol_name,
+            "Type": r.symbol_type,
+            "Confidence": `${Math.round(r.confidence * 100)}%`,
+          },
+        });
+      }
+    }
+    
+    // 11. Code duplicates — v14
+    if (projectPath) {
+      const dupResults = db.searchDuplicates(escapedQuery, projectPath, limit);
+      for (const r of dupResults) {
+        allResults.push({
+          type: "code_duplicate",
+          id: r.id,
+          title: `📋 Duplicate: ${r.file_path_1} ↔ ${r.file_path_2}`,
+          date: new Date(r.timestamp).toLocaleString(),
+          preview: `Similarity: ${Math.round(r.similarity * 100)}%, ${r.lines_count} lines`,
+          extra: {
+            "Similarity": `${Math.round(r.similarity * 100)}%`,
+            "Lines": String(r.lines_count),
+          },
+        });
+      }
     }
     
     // Сортируем по дате (новые сверху)
     allResults.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
     
-    // Ограничиваем общий лимит
     const results = allResults.slice(0, limit);
     
     if (results.length === 0) {
@@ -423,7 +464,11 @@ export function executeCtxSearch(
              `  • compaction_summaries — context compaction summaries\n` +
              `  • compressed_results — compressed cached results\n` +
              `  • compaction_keywords — normalized keywords from compactions\n` +
-             `  • failure_records — failed approaches and their solutions`;
+             `  • failure_records — failed approaches and their solutions\n` +
+             `  • code_diagnostics — TypeScript/Python/C++ errors (v14)\n` +
+             `  • code_dependencies — file dependencies (v14)\n` +
+             `  • unused_code — unused symbols (v14)\n` +
+             `  • code_duplicates — code duplicates (v14)`;
     }
     
     // Подсчёт по типам
@@ -444,6 +489,10 @@ export function executeCtxSearch(
         compressed_result: "🗜️",
         compaction_keywords_group: "🔑",
         failure_record: "⚠️",
+        code_diagnostic: "🔬",
+        code_dependency: "🔗",
+        unused_code: "🗑️",
+        code_duplicate: "📋",
       };
       const icon = typeIcons[result.type] || "📄";
       

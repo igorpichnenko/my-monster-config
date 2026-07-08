@@ -10,6 +10,7 @@
 
 | Расширение | Назначение | Статус |
 |------------|------------|--------|
+| **igorpi-code-analysis** | LSP-анализ кода (TypeScript/Python/C++), автоисправление, анализ зависимостей | ✅ Активно |
 | **igorpi-subagents** | Управление жизненным циклом субагентов (spawn, steer, monitor, inject) | ✅ Активно |
 | **igorpi-memory** | Persistent memory: SQLite + FTS5, SessionMemory, consolidation, compression | ✅ Активно |
 | **igorpi-context-tools** | Контекстно-осведомлённые инструменты (bash, read, grep, find, ls, ctx_search) | ✅ Активно |
@@ -40,6 +41,8 @@
 | **Смешение фактов между проектами** | Project Isolation через project_path (igorpi-memory) | ✅ Факты изолированы по проектам |
 | **Нет доступа к интернету** | web_search через Exa API (igorpi-minimal-web) | ✅ Модель ищет в интернете |
 | **Неправильное использование web** | Автообучение модели (igorpi-minimal-web валидация) | ✅ Меньше ошибок |
+| **Ошибки в коде** | LSP-анализ + автоисправление (igorpi-code-analysis) | ✅ Ошибки ловятся мгновенно |
+| **Неизвестные зависимости** | Анализ зависимостей, circular deps, unused код (igorpi-code-analysis) | ✅ Прозрачная карта проекта |
 
 ---
 
@@ -65,6 +68,29 @@ my-monster-config/              # Корень репозитория
 ├── README.md
 ├── package.json               # workspace: все расширения подключены
 ├── tsconfig.json
+│
+├── igorpi-code-analysis/                # LSP-анализ кода, автоисправление, зависимости
+│   ├── index.ts               # Точка входа — инициализация
+│   ├── commands/
+│   │   └── analysis-commands.ts  # /analyze /errors /fix /impact /deps /unused /duplicates /analyze-project /agent-errors
+│   ├── analyzers/
+│   │   ├── typescript-analyzer.ts
+│   │   ├── python-analyzer.ts
+│   │   ├── cpp-analyzer.ts
+│   │   └── project-detector.ts
+│   ├── auto-fix/
+│   │   └── auto-fixer.ts
+│   ├── impact/
+│   │   ├── dependency-analyzer.ts
+│   │   ├── code-duplicates-analyzer.ts
+│   │   ├── unused-code-analyzer.ts
+│   │   └── tree-sitter-cache.ts
+│   ├── state/
+│   │   └── error-state.ts
+│   ├── lib/
+│   │   └── logger.ts
+│   └── lsp/
+│       └── lsp-client.ts
 │
 ├── igorpi-subagents/                    # Управление субагентами (lifecycle)
 │   ├── index.ts               # Точка входа — инициализация
@@ -260,6 +286,31 @@ edit({
 ---
 
 ## ⚙️ Команды
+
+### Анализ кода (igorpi-code-analysis)
+
+| Команда | Описание | Параметры |
+|---------|----------|----------|
+| `/analyze` | Анализ файла на ошибки (LSP) | `<file>` |
+| `/errors [file]` | Показать ошибки из БД | `[file]` |
+| `/fix <file>` | Автоисправление ошибок | `<file>` |
+| `/impact <file> [depth]` | Показать затронутые файлы | `<file> [depth]` |
+| `/deps [file]` | Показать зависимости | `[file]` |
+| `/unused` | Найти неиспользуемый код | - |
+| `/duplicates` | Найти дубликаты кода | - |
+| `/analyze-project [--full]` | Полный анализ проекта | `[--full]` |
+| `/agent-errors <id>` | Показать ошибки субагента | `<id>` |
+
+**Поддерживаемые языки:** TypeScript, Python, C++
+
+**Особенности:**
+- Автоматический анализ при `edit`/`write` (LSP diagnostics)
+- Автоисправление с повторной проверкой
+- Детекция circular dependencies
+- Уведомления на `turn_end` если есть ошибки
+- Фильтрация по severity: только errors и warnings
+
+---
 
 ### Управление субагентами (igorpi-subagents)
 
@@ -1205,12 +1256,14 @@ pi.on("tool_result", (event, ctx) => {
 ### Архитектура зависимостей
 
 ```
+igorpi-code-analysis ──→ igorpi-memory
 igorpi-subagents ──────┐
              │
 igorpi-context-tools ──→ igorpi-memory  ←── igorpi-loop-police
                                      ←── igorpi-minimal-web
 ```
 
+- **igorpi-code-analysis** — зависит от igorpi-memory: LSP-анализ, автоисправление, анализ зависимостей
 - **igorpi-memory** — базовый слой: БД, SessionMemory, consolidation
 - **igorpi-context-tools** — зависит от igorpi-memory: регистрирует контекстные инструменты
 - **igorpi-subagents** — зависит от igorpi-memory и igorpi-context-tools: управляет субагентами
@@ -1635,6 +1688,7 @@ export class MyTableRepository {
 
 | Пакет | Путь | Назначение |
 |-------|------|------------|
+| `igorpi-code-analysis` | `file:igorpi-code-analysis` | LSP-анализ кода, автоисправление |
 | `igorpi-subagents` | `file:igorpi-subagents` | Управление субагентами |
 | `igorpi-memory` | `file:igorpi-memory` | Persistent memory (SQLite + FTS5) |
 | `igorpi-context-tools` | `file:igorpi-context-tools` | Контекстные инструменты |
@@ -1655,6 +1709,16 @@ export class MyTableRepository {
 |-------|--------|------------|
 | `igorpi-memory` | `file:../igorpi-memory` | Persistent memory (зависит от) |
 | `@earendil-works/pi-agent-core` | 0.80.3 | Dev dependency |
+
+### igorpi-code-analysis
+
+| Пакет | Версия | Назначение |
+|-------|--------|------------|
+| `igorpi-memory` | `file:../igorpi-memory` | Persistent memory (зависит от) |
+| `tree-sitter` | * | Парсинг кода |
+| `tree-sitter-typescript` | * | TypeScript парсер |
+| `tree-sitter-python` | * | Python парсер |
+| `tree-sitter-cpp` | * | C++ парсер |
 
 ### igorpi-subagents
 
@@ -1678,16 +1742,23 @@ export class MyTableRepository {
 
 | Категория | Количество |
 |-----------|------------|
-| Расширения | 5 (igorpi-subagents, igorpi-memory, igorpi-context-tools, igorpi-loop-police, igorpi-minimal-web) |
+| Расширения | 6 (igorpi-code-analysis, igorpi-subagents, igorpi-memory, igorpi-context-tools, igorpi-loop-police, igorpi-minimal-web) |
 | Переопределённые инструменты | 5 (bash, read, grep, find, ls) — igorpi-context-tools |
 | Новые инструменты | 3 (ctx_search, web_search, web_get) |
+| Команды igorpi-code-analysis | 9 (/analyze, /errors, /fix, /impact, /deps, /unused, /duplicates, /analyze-project, /agent-errors) |
 | Команды igorpi-subagents | 8 (/agent-bg, /agent-steer, /agent-result, /agent-inject, /agent-resume, /agent-view, /agent-status, /agents) |
-| Команды igorpi-memory | 10 (/memory-stats, /memory-test, /memory-purge, /memory-search, /memory-add, /memory-summaries, /memory-keywords, /memory-failures, /memory-subagents, /memory-consolidate) |
+| Команды igorpi-memory | 11 (/memory-stats, /memory-test, /memory-purge, /memory-search, /memory-add, /memory-summaries, /memory-keywords, /memory-failures, /memory-subagents, /memory-consolidate, /memory-dedup) |
 | Команды igorpi-loop-police | 2 (/igorpi-loop-police, /add_context) |
-| События igorpi-subagents | 5 (session_start, session_before_switch, session_shutdown, tool_execution_start, before_agent_start) |
+| Команды igorpi-subagents (agents-menu) | 1 (/agents) |
+| События igorpi-code-analysis | 4 (subagents:file_edited, tool_result, turn_end, session_shutdown) |
+| События igorpi-subagents | 5 (before_agent_start, session_start, session_before_switch, session_shutdown, tool_execution_start) |
 | События igorpi-memory | 2 (session_start, session_shutdown) |
 | События igorpi-loop-police | 6 (agent_start, agent_end, turn_start, message_update, message_end, tool_call) |
 | События igorpi-minimal-web | 3 (agent_start, tool_call, tool_result) |
+| MessageRenderers igorpi-code-analysis | 1 (igorpi-code-analysis) |
+| MessageRenderers igorpi-loop-police | 2 (igorpi-loop-police, add-context) |
+| MessageRenderers igorpi-minimal-web | 1 (web-guidance) |
+| MessageRenderers igorpi-subagents | 3 (subagent-result, subagent-result-silent, notification) |
 | Фоновые процессы | 7 |
 | Таблицы БД | 7 |
 | FTS5 индексов | 7 |
@@ -1708,13 +1779,16 @@ export class MyTableRepository {
 
 ## 🏗 Модульная архитектура
 
-В результате рефакторинга `igorpi-subagents` разделён на 3 независимых расширения:
+В результате рефакторинга `igorpi-subagents` разделён на 6 независимых расширений:
 
 | Расширение | Что делает | Зависит от |
 |------------|------------|------------|
+| **igorpi-code-analysis** | LSP-анализ кода, автоисправление, анализ зависимостей | igorpi-memory |
 | **igorpi-memory** | Singleton MemoryDatabase, SessionMemory, consolidation, compression, commands | better-sqlite3, typebox, nanoid |
 | **igorpi-context-tools** | Контекстные инструменты (bash, read, grep, find, ls, ctx_search) | igorpi-memory |
 | **igorpi-subagents** | Управление субагентами (spawn, steer, monitor, inject) | igorpi-memory, igorpi-context-tools |
+| **igorpi-loop-police** | Защита от зацикливания агентов | — |
+| **igorpi-minimal-web** | Веб-инструменты (web_search, web_get) | — |
 
 **Почему разделили:**
 - **igorpi-memory** можно использовать отдельно от субагентов
@@ -1729,6 +1803,7 @@ export class MyTableRepository {
   "npm:igorpi-minimal-web",
   "npm:igorpi-loop-police",
   "npm:igorpi-memory",
+  "npm:igorpi-code-analysis",
   "npm:igorpi-context-tools",
   "npm:igorpi-subagents"
 ]
@@ -1759,7 +1834,7 @@ export class MyTableRepository {
 19. **Auto-Consolidation**: Слияние похожих записей для уменьшения дубликатов (igorpi-memory)
 20. **Automatic Purge**: Контроль размера БД (раз в неделю, выборочная очистка) (igorpi-memory)
 21. **Безопасное закрытие БД**: memoryDb.close() в session_shutdown (igorpi-memory)
-22. **Модульная архитектура**: 5 независимых расширений с чёткими зависимостями
+22. **Модульная архитектура**: 6 независимых расширений с чёткими зависимостями
 23. **Поддержка UUID**: ctx_search работает с укороченными UUID субагентов (igorpi-memory)
 24. **Веб-инструменты**: Интеграция с Exa API для поиска в интернете (igorpi-minimal-web)
 25. **Автообучение**: Валидация параметров web-инструментов (igorpi-minimal-web)

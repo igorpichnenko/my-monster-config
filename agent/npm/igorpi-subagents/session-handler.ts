@@ -14,7 +14,7 @@ export function registerSessionEvents(
   manager: AgentManager,
   widget: AgentWidget,
 ): void {
-  pi.on("session_start", async (event: any, ctx: any) => {
+  pi.on("session_start", async (_event: any, ctx: any) => {
     widget.setUICtx(ctx.ui as any);
     manager.clearCompleted(true);
   });

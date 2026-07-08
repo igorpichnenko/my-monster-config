@@ -4,6 +4,7 @@
   "dependencies": {
     "@earendil-works/pi-ai": "^0.80.3",
     "@earendil-works/pi-coding-agent": "^0.80.3",
+    "igorpi-code-analysis": "file:igorpi-code-analysis",
     "igorpi-context-tools": "file:igorpi-context-tools",
     "igorpi-loop-police": "file:igorpi-loop-police",
     "igorpi-memory": "file:igorpi-memory",
