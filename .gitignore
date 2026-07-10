@@ -2,6 +2,10 @@
 memory/
 logs/
 agent/sessions/
+pi-web
+pi-web.sqlite
+pi-web.sqlite-shm
+pi-web.sqlite-wal
 
 # === npm зависимости ===
 agent/npm/*/node_modules/

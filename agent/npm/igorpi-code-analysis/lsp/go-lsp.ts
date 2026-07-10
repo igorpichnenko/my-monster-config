@@ -1,14 +1,14 @@
 /**
- * typescript-language-server.ts — Клиент для TypeScript Language Server
+ * go-lsp.ts — Клиент для gopls (Go Language Server)
  * 
- * v14.4: Исправлен languageId для .tsx файлов (typescriptreact)
+ * v1.0: Базовая поддержка Go через gopls
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { log } from "../lib/logger.js";
 
-export interface Diagnostic {
+export interface GoDiagnostic {
   filePath: string;
   line: number;
   column: number;
@@ -21,19 +21,11 @@ export interface Diagnostic {
   suggestion?: string;
 }
 
-/** Определяет languageId по расширению файла */
-function getLanguageId(filePath: string): string {
-  if (filePath.endsWith('.tsx')) return 'typescriptreact';
-  if (filePath.endsWith('.jsx')) return 'javascriptreact';
-  if (filePath.endsWith('.js') || filePath.endsWith('.mjs')) return 'javascript';
-  return 'typescript';
-}
-
-export class TypeScriptLanguageServer {
+export class GoLanguageServer {
   private process: ChildProcess | null = null;
   private requestId = 0;
   private pendingRequests = new Map<number, { resolve: Function; reject: Function }>();
-  private diagnosticsCallbacks = new Map<string, (diagnostics: Diagnostic[]) => void>();
+  private diagnosticsCallbacks = new Map<string, (diagnostics: GoDiagnostic[]) => void>();
   private projectPath: string;
   private initialized = false;
   private buffer = "";
@@ -41,20 +33,20 @@ export class TypeScriptLanguageServer {
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
-    this.lspPath = this.findLspServer();
+    this.lspPath = this.findGopls();
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
 
     if (!this.lspPath) {
-      throw new Error('TypeScript Language Server not found. Install: npm install -g typescript-language-server');
+      throw new Error('gopls not found. Install: go install golang.org/x/tools/gopls@latest');
     }
 
-    log(`🚀 Starting LSP server: ${this.lspPath}`);
+    log(`🚀 Starting gopls: ${this.lspPath}`);
     log(`📁 Project path: ${this.projectPath}`);
 
-    this.process = spawn(this.lspPath, ["--stdio"], {
+    this.process = spawn(this.lspPath, ["serve"], {
       cwd: this.projectPath,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -65,11 +57,11 @@ export class TypeScriptLanguageServer {
 
     this.process.stderr?.on("data", (data: Buffer) => {
       const text = data.toString().trim();
-      if (text) log(`⚠️ LSP stderr: ${text.slice(0, 200)}`);
+      if (text) log(`⚠️ gopls stderr: ${text.slice(0, 200)}`);
     });
 
     this.process.on("exit", (code) => {
-      log(`🔚 LSP server exited with code ${code}`);
+      log(`🔚 gopls exited with code ${code}`);
       this.initialized = false;
     });
 
@@ -89,10 +81,24 @@ export class TypeScriptLanguageServer {
     log(`📤 Sending initialized notification...`);
     this.sendNotification("initialized", {});
     this.initialized = true;
-    log(`✅ TypeScript LSP initialized for ${this.projectPath}`);
+    log(`✅ gopls initialized for ${this.projectPath}`);
   }
 
-  async didChange(filePath: string, content: string): Promise<void> {
+  async didOpen(filePath: string, content: string): Promise<void> {
+    if (!this.initialized) return;
+    log(`📤 Sending didOpen for ${filePath}`);
+    this.sendNotification("textDocument/didOpen", {
+      textDocument: {
+        uri: `file://${filePath}`,
+        languageId: "go",
+        version: 1,
+        text: content,
+      },
+    });
+    log(`✅ didOpen sent for ${filePath}`);
+  }
+
+  didChange(filePath: string, content: string): void {
     if (!this.initialized) return;
     log(`📤 Sending didChange for ${filePath}`);
     this.sendNotification("textDocument/didChange", {
@@ -102,29 +108,10 @@ export class TypeScriptLanguageServer {
     log(`✅ didChange sent for ${filePath}`);
   }
 
-  async didOpen(filePath: string, content: string): Promise<void> {
-    if (!this.initialized) return;
-
-    // v14.4: Определяем languageId по расширению файла
-    const languageId = getLanguageId(filePath);
-    log(`📤 Sending didOpen for ${filePath} (languageId: ${languageId})`);
-
-    this.sendNotification("textDocument/didOpen", {
-      textDocument: {
-        uri: `file://${filePath}`,
-        languageId,
-        version: 1,
-        text: content,
-      },
-    });
-    log(`✅ didOpen sent for ${filePath}`);
-  }
-
-  async getDiagnostics(filePath: string, timeoutMs: number = 180000): Promise<Diagnostic[]> {
+  async getDiagnostics(filePath: string, timeoutMs: number = 180000): Promise<GoDiagnostic[]> {
     if (!this.initialized) return [];
 
     log(`🔍 getDiagnostics called for ${filePath} (timeout: ${timeoutMs}ms)`);
-    log(`   Registered callbacks: ${Array.from(this.diagnosticsCallbacks.keys()).join(', ') || 'none'}`);
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
@@ -139,14 +126,12 @@ export class TypeScriptLanguageServer {
         log(`✅ Callback fired for ${filePath}: ${diagnostics.length} diagnostics`);
         resolve(diagnostics);
       });
-
-      log(`   Callback registered for ${filePath}`);
     });
   }
 
   async shutdown(): Promise<void> {
     if (!this.process) return;
-    log(`🛑 Shutting down LSP server...`);
+    log(`🛑 Shutting down gopls...`);
     try {
       await this.sendRequest("shutdown", {});
       this.sendNotification("exit", {});
@@ -154,21 +139,22 @@ export class TypeScriptLanguageServer {
     this.process.kill();
     this.process = null;
     this.initialized = false;
-    log(`✅ LSP server shutdown complete`);
+    log(`✅ gopls shutdown complete`);
   }
 
-  private findLspServer(): string {
+  private findGopls(): string {
     const paths = [
-      "/home/igorp/.nvm/versions/node/v22.23.0/bin/typescript-language-server",
-      "/usr/bin/typescript-language-server",
-      "/usr/local/bin/typescript-language-server",
+      process.env.GOPATH ? `${process.env.GOPATH}/bin/gopls` : "",
+      `${process.env.HOME}/go/bin/gopls`,
+      "/usr/local/bin/gopls",
+      "/usr/bin/gopls",
     ];
     for (const path of paths) {
-      if (existsSync(path)) return path;
+      if (path && existsSync(path)) return path;
     }
     try {
       const { execSync } = require("node:child_process");
-      const result = execSync("which typescript-language-server", { encoding: "utf-8" }).trim();
+      const result = execSync("which gopls", { encoding: "utf-8" }).trim();
       if (existsSync(result)) return result;
     } catch {}
     return "";
@@ -178,8 +164,7 @@ export class TypeScriptLanguageServer {
     return new Promise((resolve, reject) => {
       const id = ++this.requestId;
       this.pendingRequests.set(id, { resolve, reject });
-      const message = { jsonrpc: "2.0", id, method, params };
-      this.sendLspMessage(message);
+      this.sendLspMessage({ jsonrpc: "2.0", id, method, params });
       setTimeout(() => {
         if (this.pendingRequests.has(id)) {
           this.pendingRequests.delete(id);
@@ -243,32 +228,16 @@ export class TypeScriptLanguageServer {
       const diagnostics = this.parseDiagnostics(response.params.diagnostics, filePath);
       log(`🎯 Received ${diagnostics.length} diagnostics for "${filePath}"`);
 
-      for (const d of diagnostics) {
-        log(`   ${d.severity}: ${d.message} (line ${d.line})`);
-      }
-
-      let callback = this.diagnosticsCallbacks.get(filePath);
-      if (!callback) {
-        for (const [key, cb] of this.diagnosticsCallbacks.entries()) {
-          if (filePath.endsWith(key) || key.endsWith(filePath)) {
-            callback = cb;
-            log(`✅ Found callback via partial match: registered="${key}", received="${filePath}"`);
-            break;
-          }
-        }
-      }
-
+      const callback = this.diagnosticsCallbacks.get(filePath);
       if (callback) {
-        log(`✅ Calling diagnostics callback for ${filePath}`);
         callback(diagnostics);
       } else {
         log(`⚠️ No callback registered for ${filePath}`);
-        log(`   Registered callbacks: ${Array.from(this.diagnosticsCallbacks.keys()).map(k => `"${k}"`).join(', ')}`);
       }
     }
   }
 
-  private parseDiagnostics(items: any[], filePath: string): Diagnostic[] {
+  private parseDiagnostics(items: any[], filePath: string): GoDiagnostic[] {
     if (!items) return [];
     return items.map((item) => ({
       filePath,
@@ -277,8 +246,8 @@ export class TypeScriptLanguageServer {
       endLine: item.range.end.line + 1,
       endColumn: item.range.end.character + 1,
       severity: this.mapSeverity(item.severity),
-      source: item.source || "typescript",
-      ruleId: String(item.code ?? ""),
+      source: item.source || "gopls",
+      ruleId: item.code?.toString() || "",
       message: item.message,
       suggestion: item.message,
     }));
@@ -291,30 +260,6 @@ export class TypeScriptLanguageServer {
       case 3: return 'info';
       case 4: return 'hint';
       default: return 'warning';
-    }
-  }
-
-  async getCodeActions(filePath: string, diagnostics: Diagnostic[]): Promise<any[]> {
-    if (!this.initialized) return [];
-    try {
-      const result = await this.sendRequest("textDocument/codeAction", {
-        textDocument: { uri: `file://${filePath}` },
-        range: { start: { line: 0, character: 0 }, end: { line: 9999, character: 0 } },
-        context: {
-          diagnostics: diagnostics.map(d => ({
-            range: {
-              start: { line: d.line - 1, character: d.column - 1 },
-              end: { line: (d.endLine || d.line) - 1, character: (d.endColumn || d.column) - 1 },
-            },
-            severity: d.severity === "error" ? 1 : d.severity === "warning" ? 2 : 3,
-            message: d.message,
-          })),
-        },
-      });
-      return result || [];
-    } catch (err) {
-      log(`❌ Failed to get code actions: ${err}`);
-      return [];
     }
   }
 }

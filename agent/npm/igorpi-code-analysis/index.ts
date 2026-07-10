@@ -1,9 +1,9 @@
 /**
  * igorpi-code-analysis — Анализ кода для pi-coding-agent
  * 
- * v20.1: Жесткая фильтрация hints + защита от спама
- * - Hints (severity 3/4) полностью игнорируются
- * - Уведомления и errorState срабатывают ТОЛЬКО на реальные errors/warnings
+ * v20.3: Добавлена поддержка Go + исправлено управление errorState
+ * - errorState управляется на основе БД, а не анализатора
+ * - Уведомления показываются ТОЛЬКО если есть реальные ошибки в БД
  */
 
 import type { ExtensionAPI, ToolResultEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,6 +12,7 @@ import { detectProjectType, isSupportedFile } from "./analyzers/project-detector
 import { getTypeScriptAnalyzer, resetTypeScriptAnalyzer } from "./analyzers/typescript-analyzer.js";
 import { getPythonAnalyzer, resetPythonAnalyzer } from "./analyzers/python-analyzer.js";
 import { getCppAnalyzer, resetCppAnalyzer } from "./analyzers/cpp-analyzer.js";
+import { getGoAnalyzer, resetGoAnalyzer } from "./analyzers/go-analyzer.js";
 import { errorState } from "./state/error-state.js";
 import { registerAnalysisCommands } from "./commands/analysis-commands.js";
 import { AutoFixer } from "./auto-fix/auto-fixer.js";
@@ -19,9 +20,6 @@ import { getTreeSitterCache } from "./impact/tree-sitter-cache.js";
 import { isAbsolute, join } from "node:path";
 import { log } from "./lib/logger.js";
 
-// ==========================================================================
-// Хелперы для надежного определения severity (LSP может возвращать числа 1-4)
-// ==========================================================================
 function isRealError(d: any) {
   const s = typeof d.severity === "string" ? d.severity.toLowerCase() : d.severity;
   return s === "error" || s === 1;
@@ -32,6 +30,31 @@ function isWarning(d: any) {
 }
 function isSignificant(d: any) {
   return isRealError(d) || isWarning(d);
+}
+
+/**
+ * Определяет тип языка по расширению файла и возвращает соответствующий анализатор.
+ * Это ключевая функция: выбор анализатора определяется расширением файла,
+ * а не типом проекта. Это позволяет корректно обрабатывать проекты с несколькими языками.
+ */
+function getAnalyzerForFile(filePath: string, cwd: string): { analyzer: any; lang: string } | null {
+  const ext = filePath.split(".").pop()?.toLowerCase();
+  if (!ext) return null;
+
+  // Определяем язык по расширению файла
+  if (["ts", "tsx", "js", "jsx"].includes(ext)) {
+    return { analyzer: getTypeScriptAnalyzer(cwd), lang: "typescript" };
+  }
+  if (["py", "pyi"].includes(ext)) {
+    return { analyzer: getPythonAnalyzer(cwd), lang: "python" };
+  }
+  if (["cpp", "c", "cc", "cxx", "h", "hpp"].includes(ext)) {
+    return { analyzer: getCppAnalyzer(cwd), lang: "cpp" };
+  }
+  if (ext === "go") {
+    return { analyzer: getGoAnalyzer(cwd), lang: "go" };
+  }
+  return null;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -50,18 +73,21 @@ export default function (pi: ExtensionAPI) {
     return new Text(theme.fg("warning", String(message.content)), 0, 0);
   });
 
-  if (projectType === "typescript") {
-    const analyzer = getTypeScriptAnalyzer(projectPath);
-    analyzer.initialize().then(() => log(`✅ TypeScript analyzer ready`)).catch((err) => log(`❌ Failed to initialize TypeScript analyzer: ${err}`));
-  } else if (projectType === "python") {
-    const analyzer = getPythonAnalyzer(projectPath);
-    analyzer.initialize().then(() => log(`✅ Python analyzer ready`)).catch((err) => log(`❌ Failed to initialize Python analyzer: ${err}`));
-  } else if (projectType === "cpp") {
-    const analyzer = getCppAnalyzer(projectPath);
-    analyzer.initialize().then(() => log(`✅ C++ analyzer ready`)).catch((err) => log(`❌ Failed to initialize C++ analyzer: ${err}`));
-  } else {
-    log(`⚠️ Unknown project type — analysis disabled`);
-  }
+  // Инициализируем ВСЕ анализаторы, которые могут понадобиться.
+  // Выбор анализатора для конкретного файла определяется по расширению файла,
+  // а не по типу проекта. Это позволяет корректно анализировать проекты
+  // с несколькими языками (например, TS + Go).
+  const tsAnalyzer = getTypeScriptAnalyzer(projectPath);
+  tsAnalyzer.initialize().then(() => log(`✅ TypeScript analyzer ready`)).catch((err) => log(`❌ Failed to initialize TypeScript analyzer: ${err}`));
+
+  const pyAnalyzer = getPythonAnalyzer(projectPath);
+  pyAnalyzer.initialize().then(() => log(`✅ Python analyzer ready`)).catch((err) => log(`❌ Failed to initialize Python analyzer: ${err}`));
+
+  const cppAnalyzer = getCppAnalyzer(projectPath);
+  cppAnalyzer.initialize().then(() => log(`✅ C++ analyzer ready`)).catch((err) => log(`❌ Failed to initialize C++ analyzer: ${err}`));
+
+  const goAnalyzer = getGoAnalyzer(projectPath);
+  goAnalyzer.initialize().then(() => log(`✅ Go analyzer ready`)).catch((err) => log(`❌ Failed to initialize Go analyzer: ${err}`));
 
   // ==========================================================================
   // Подписка на события от субагентов
@@ -71,33 +97,23 @@ export default function (pi: ExtensionAPI) {
     
     log(`🔔 Subagent ${agentId} (${agentType}) edited: ${filePath} via ${toolName}`);
     
-    if (!isSupportedFile(filePath)) {
-      log(`⏭️ Skipping subagent edit — unsupported file type`);
+    // Определяем анализатор ПО расширению файла, а не по типу проекта
+    const analyzerInfo = getAnalyzerForFile(filePath, cwd);
+    if (!analyzerInfo) {
+      log(`⏭️ Skipping subagent edit — unsupported file type: ${filePath}`);
       return;
     }
     
-    const subagentProjectType = detectProjectType(cwd);
-    log(`🏷️ Subagent project type: ${subagentProjectType}`);
+    const { analyzer, lang } = analyzerInfo;
+    log(`🏷️ File language: ${lang} (from extension)`);
     
     try {
       let diagnostics: any[] = [];
+      const { readFileSync } = await import("node:fs");
+      const fileContent = readFileSync(filePath, "utf-8");
       
-      if (subagentProjectType === "typescript") {
-        const analyzer = getTypeScriptAnalyzer(cwd);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        const { readFileSync } = await import("node:fs");
-        diagnostics = await analyzer.updateFile(filePath, readFileSync(filePath, "utf-8"));
-      } else if (subagentProjectType === "python") {
-        const analyzer = getPythonAnalyzer(cwd);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        const { readFileSync } = await import("node:fs");
-        diagnostics = await analyzer.updateFile(filePath, readFileSync(filePath, "utf-8"));
-      } else if (subagentProjectType === "cpp") {
-        const analyzer = getCppAnalyzer(cwd);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        const { readFileSync } = await import("node:fs");
-        diagnostics = await analyzer.updateFile(filePath, readFileSync(filePath, "utf-8"));
-      }
+      if (!analyzer.isInitialized()) await analyzer.initialize();
+      diagnostics = await analyzer.updateFile(filePath, fileContent);
       
       const significantDiagnostics = diagnostics.filter(isSignificant);
       log(`📊 Total diagnostics: ${diagnostics.length}, significant: ${significantDiagnostics.length}`);
@@ -142,7 +158,14 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName !== "edit" && event.toolName !== "write") return;
 
     let filePath = (event.input as { path?: string }).path;
-    if (!filePath || !isSupportedFile(filePath)) return;
+    if (!filePath) return;
+
+    // Определяем анализатор ПО расширению файла, а не по типу проекта
+    const analyzerInfo = getAnalyzerForFile(filePath, projectPath);
+    if (!analyzerInfo) {
+      log(`⏭️ Skipping tool_result — unsupported file type: ${filePath}`);
+      return;
+    }
 
     if (!isAbsolute(filePath)) filePath = join(projectPath, filePath);
     log(`📝 File edited: ${filePath}`);
@@ -156,19 +179,11 @@ export default function (pi: ExtensionAPI) {
       const { readFileSync } = await import("node:fs");
       const content = readFileSync(filePath, "utf-8");
 
-      if (projectType === "typescript") {
-        const analyzer = getTypeScriptAnalyzer(projectPath);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        diagnostics = await analyzer.updateFile(filePath, content);
-      } else if (projectType === "python") {
-        const analyzer = getPythonAnalyzer(projectPath);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        diagnostics = await analyzer.updateFile(filePath, content);
-      } else if (projectType === "cpp") {
-        const analyzer = getCppAnalyzer(projectPath);
-        if (!analyzer.isInitialized()) await analyzer.initialize();
-        diagnostics = await analyzer.updateFile(filePath, content);
-      }
+      const { analyzer, lang } = analyzerInfo;
+      log(`🏷️ File language: ${lang} (from extension)`);
+
+      if (!analyzer.isInitialized()) await analyzer.initialize();
+      diagnostics = await analyzer.updateFile(filePath, content);
 
       const significantDiagnostics = diagnostics.filter(isSignificant);
       log(`📊 Total diagnostics: ${diagnostics.length}, significant: ${significantDiagnostics.length}`);
@@ -187,9 +202,12 @@ export default function (pi: ExtensionAPI) {
           const newContent = readFileSync(filePath, "utf-8");
           let newDiagnostics: any[] = [];
           
-          if (projectType === "typescript") newDiagnostics = await getTypeScriptAnalyzer(projectPath).updateFile(filePath, newContent);
-          else if (projectType === "python") newDiagnostics = await getPythonAnalyzer(projectPath).updateFile(filePath, newContent);
-          else if (projectType === "cpp") newDiagnostics = await getCppAnalyzer(projectPath).updateFile(filePath, newContent);
+          // Определяем анализатор ПО расширению файла для повторной проверки
+          const reAnalyzerInfo = getAnalyzerForFile(filePath, projectPath);
+          if (reAnalyzerInfo) {
+            if (!reAnalyzerInfo.analyzer.isInitialized()) await reAnalyzerInfo.analyzer.initialize();
+            newDiagnostics = await reAnalyzerInfo.analyzer.updateFile(filePath, newContent);
+          }
           
           const significantNewDiagnostics = newDiagnostics.filter(isSignificant);
           
@@ -232,24 +250,21 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ==========================================================================
-  // Уведомление на turn_end (ТОЛЬКО если есть реальные ошибки)
+  // Уведомление на turn_end (ТОЛЬКО если есть реальные ошибки в БД)
   // ==========================================================================
-  pi.on("turn_end", async (event: any, ctx: any) => {
-    // v18: Проверяем реальное количество ошибок в БД, а не errorState
+  pi.on("turn_end", async (_event: any, ctx: any) => {
     const errorsInDb = memoryDb.getDiagnosticsByProject(projectPath, 1000);
     
     if (errorsInDb.length > 0) {
-      const errorCount = errorsInDb.filter(e => e.severity === "error").length;
-      const warningCount = errorsInDb.filter(e => e.severity === "warning").length;
+      const errorCount = errorsInDb.filter((e: any) => e.severity === "error").length;
+      const warningCount = errorsInDb.filter((e: any) => e.severity === "warning").length;
       
       if (errorCount === 0 && warningCount === 0) {
-        // Нет реальных ошибок - очищаем errorState
         errorState.reset();
         return;
       }
       
-      // Получаем уникальные файлы с ошибками
-      const filesWithErrors = [...new Set(errorsInDb.map(e => e.file_path))].slice(0, 3);
+      const filesWithErrors = [...new Set(errorsInDb.map((e: any) => e.file_path))].slice(0, 3);
       
       const parts: string[] = [];
       if (errorCount > 0) parts.push(`❌ ${errorCount} error(s)`);
@@ -258,21 +273,22 @@ export default function (pi: ExtensionAPI) {
       const summary = parts.join(", ");
       
       ctx.ui.notify(
-        `${summary} in ${filesWithErrors.length} file(s): ${filesWithErrors.map(f => f.split("/").slice(-2).join("/")).join(", ")}${filesWithErrors.length > 3 ? "..." : ""}. ` +
+        `${summary} in ${filesWithErrors.length} file(s): ${filesWithErrors.map((f: string) => f.split("/").slice(-2).join("/")).join(", ")}${filesWithErrors.length > 3 ? "..." : ""}. ` +
         `Use /errors to review or /fix to auto-fix.`,
         "warning"
       );
     } else {
-      // БД пустая - очищаем errorState
       errorState.reset();
     }
   });
 
   pi.on("session_shutdown", async () => {
     log(`🛑 Session shutdown`);
-    if (projectType === "typescript") { await getTypeScriptAnalyzer(projectPath).shutdown(); resetTypeScriptAnalyzer(); } 
-    else if (projectType === "python") { await getPythonAnalyzer(projectPath).shutdown(); resetPythonAnalyzer(); } 
-    else if (projectType === "cpp") { await getCppAnalyzer(projectPath).shutdown(); resetCppAnalyzer(); }
+    // Shut down ALL analyzers — we initialize all of them now
+    await getTypeScriptAnalyzer(projectPath).shutdown(); resetTypeScriptAnalyzer();
+    await getPythonAnalyzer(projectPath).shutdown(); resetPythonAnalyzer();
+    await getCppAnalyzer(projectPath).shutdown(); resetCppAnalyzer();
+    await getGoAnalyzer(projectPath).shutdown(); resetGoAnalyzer();
     errorState.reset();
   });
 }

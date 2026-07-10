@@ -1,7 +1,7 @@
 /**
  * analysis-commands.ts — Команды для анализа кода
  * 
- * v18.3: Возвращена команда /agent-errors + прогресс + таймаут 3 минуты
+ * v18.4: Добавлена поддержка Go + экспорт хелперов
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -9,6 +9,7 @@ import { MemoryDatabase } from "../../igorpi-memory/index.js";
 import { getTypeScriptAnalyzer } from "../analyzers/typescript-analyzer.js";
 import { getPythonAnalyzer } from "../analyzers/python-analyzer.js";
 import { getCppAnalyzer } from "../analyzers/cpp-analyzer.js";
+import { getGoAnalyzer } from "../analyzers/go-analyzer.js";
 import { detectProjectType, isSupportedFile } from "../analyzers/project-detector.js";
 import { log } from "../lib/logger.js";
 import { readdirSync, statSync } from "node:fs";
@@ -50,6 +51,7 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
         if (projectType === "typescript") analyzer = getTypeScriptAnalyzer(projectPath);
         else if (projectType === "python") analyzer = getPythonAnalyzer(projectPath);
         else if (projectType === "cpp") analyzer = getCppAnalyzer(projectPath);
+        else if (projectType === "go") analyzer = getGoAnalyzer(projectPath);
 
         if (!analyzer) return cmdCtx.ui.notify(`Analysis not implemented for ${projectType} projects yet`, "warning");
         if (!analyzer.isInitialized()) await analyzer.initialize();
@@ -121,6 +123,7 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
           if (projectType === "typescript") analyzer = getTypeScriptAnalyzer(projectPath);
           else if (projectType === "python") analyzer = getPythonAnalyzer(projectPath);
           else if (projectType === "cpp") analyzer = getCppAnalyzer(projectPath);
+          else if (projectType === "go") analyzer = getGoAnalyzer(projectPath);
 
           if (analyzer) {
             if (!analyzer.isInitialized()) await analyzer.initialize();
@@ -145,7 +148,7 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
 
   // /impact <file> [depth]
   pi.registerCommand("impact", {
-    description: "Show impacted files: /impact <file> [depth>",
+    description: "Show impacted files: /impact <file> [depth]",
     handler: async (argStr: string, cmdCtx: any) => {
       const parts = argStr.trim().split(/\s+/);
       const filePath = parts[0];
@@ -217,7 +220,7 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
     },
   });
 
-  // /agent-errors <id> - ВОЗВРАЩЕНА
+  // /agent-errors <id>
   pi.registerCommand("agent-errors", {
     description: "Show errors introduced by subagent: /agent-errors <id>",
     handler: async (argStr: string, cmdCtx: any) => {
@@ -327,6 +330,7 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
           if (projectType === "typescript") analyzer = getTypeScriptAnalyzer(projectPath);
           else if (projectType === "python") analyzer = getPythonAnalyzer(projectPath);
           else if (projectType === "cpp") analyzer = getCppAnalyzer(projectPath);
+          else if (projectType === "go") analyzer = getGoAnalyzer(projectPath);
 
           if (analyzer) {
             if (!analyzer.isInitialized()) await analyzer.initialize();
@@ -335,7 +339,6 @@ export function registerAnalysisCommands(pi: ExtensionAPI, memoryDb: MemoryDatab
               const file = files[i];
               const progress = Math.round(((i + 1) / files.length) * 100);
               
-              // Показываем прогресс каждые 5 файлов или в начале/конце
               if (i === 0 || i === files.length - 1 || (i + 1) % 5 === 0) {
                 cmdCtx.ui.notify(`📊 Progress: ${i + 1}/${files.length} files (${progress}%)`, "info");
               }
@@ -400,7 +403,7 @@ function getAllFiles(dir: string, files: string[] = []): string[] {
       if (["node_modules", "dist", "build", ".git", ".pi"].includes(entry)) continue;
       getAllFiles(fullPath, files);
     } else {
-      if (/\.(ts|tsx|js|jsx|py|pyi|cpp|c|h|hpp)$/.test(entry)) files.push(fullPath);
+      if (/\.(ts|tsx|js|jsx|py|pyi|cpp|c|h|hpp|go)$/.test(entry)) files.push(fullPath);
     }
   }
   return files;
